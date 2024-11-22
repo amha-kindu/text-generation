@@ -23,6 +23,9 @@ pip install torch tokenizers tqdm nltk tensorboard torchmetrics
 
 ## Data
 
+Sourse: https://data.mendeley.com/datasets/dtywyf3sth/1
+Research Paper: "Introducing Various Semantic Models for Amharic: Experimentation and Evaluation with Multiple Tasks and Datasets"
+
 The dataset used for training the model is found in data folder in JSON file containing English to Amharic translation pairs. Each entry in the dataset has the following format:
 
 ```json

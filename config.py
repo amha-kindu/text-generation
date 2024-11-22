@@ -10,6 +10,7 @@ else:
     DEVICE = torch.device('cpu')
 random.seed(3000)
 
+VOCAB_SIZE=25000
 BATCH_SIZE = 64
 EPOCHS = 100
 INIT_LR = 2e-04
@@ -19,8 +20,8 @@ N_BLOCKS = 6
 HEADS = 16
 DROPOUT = 0.1
 DFF = 2048
-MODEL_FOLDER = "models"
-PRELOAD_MODEL_SUFFIX = ""
-TOKENIZER_FILEPATH = "tokenizers/amharic-bpe-tokenizer-v1-25k.json"
+MODELS_FOLDER = "models"
+PRELOAD_MODEL_FILEPATH = ""
+TOKENIZER_FILEPATH = f"tokenizers/amharic-bpe-tokenizer-v1-{VOCAB_SIZE // 1000}k.json"
 TB_LOG_DIR = "logs"
-DATASET_PATH = "data/parallel-corpus-en-am-v3.5.json"
+DATASET_PATH = "data/amharic-texts.txt"
