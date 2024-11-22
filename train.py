@@ -38,13 +38,13 @@ def get_dataset() -> tuple[TextDataset, TextDataset, TextDataset]:
     
     
 @torch.no_grad()
-def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func: nn.CrossEntropyLoss):
-    #Set the transformer module(the model) to evaluation mode
+def validate(model: GPTmodel, val_dataset: TextDataset, loss_func: nn.CrossEntropyLoss):
     model.eval()
 
+    batch_iterator = val_dataset.batch_iterator(BATCH_SIZE)
+
     val_loss = 0
-    # Evaluate model with `num_examples` number of random examples
-    for batch in val_batch_iterator:
+    for batch in batch_iterator:
         # Retrieve the data points from the current batch
         # (batches, seq_len)
         decoder_input = batch["decoder_input"].to(DEVICE)
@@ -76,7 +76,49 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func: nn.Cros
 
     return val_loss
 
-    
+@torch.no_grad()
+def test(model: GPTmodel, test_dataset: TextDataset):
+    print(f"Testing started on `{DEVICE}` device")
+
+    loss_func = nn.CrossEntropyLoss(ignore_index=test_dataset.tokenizer.token_to_id('[PAD]'), label_smoothing=0.1).to(DEVICE)
+
+    batch_iterator = tqdm(test_dataset.batch_iterator(BATCH_SIZE), desc=f"Evaluating model on test dataset", colour="GREEN")
+
+    evaluation_loss = 0
+    # Iterate through the batches
+    for batch in batch_iterator:
+        # (batches, seq_len)
+        decoder_input = batch["decoder_input"].to(DEVICE)
+
+        # (bathes, 1, seq_len, seq_len)
+        decoder_mask = batch["decoder_mask"].to(DEVICE)
+
+        # (batches, seq_len)
+        label: torch.Tensor = batch['label'].to(DEVICE)
+
+        # (batches, seq_len, d_model)
+        decoder_output = model.decode(decoder_input, decoder_mask)
+
+        # (batches, seq_len, tgt_vocab_size)
+        logits: torch.Tensor = model.project(decoder_output)
+
+        # Compute the training loss
+        test_loss: torch.Tensor = loss_func(
+            # (batches, seq_len, tgt_vocab_size)  -->  (batches*seq_len, tgt_vocab_size)
+            logits.view(-1, test_dataset.tokenizer.get_vocab_size()),
+
+            # (batches, seq_len)   -->   (batches * seq_len, )
+            label.view(-1)
+        )
+
+        # Add the calculated test loss as a postfix to the progress bar shown by tqdm
+        batch_iterator.set_postfix({"test_loss": f"{test_loss.item():6.3f}"})
+
+        evaluation_loss += test_loss.item()
+
+    avg_loss = evaluation_loss / len(batch_iterator)
+    print(f"\nTesting finished with an average cross-entropy loss of {avg_loss}")
+
 def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset) -> None:   
     # Configure Tensorboard
     writer = SummaryWriter(TB_LOG_DIR)
@@ -104,7 +146,6 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset)
     loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.tokenizer.token_to_id('[PAD]'), label_smoothing=0.1).to(DEVICE)
 
     batch_iterator = train_dataset.batch_iterator(BATCH_SIZE)
-    val_batch_iterator = val_dataset.batch_iterator(BATCH_SIZE)
 
     for epoch in range(initial_epoch, EPOCHS):
         batch_iterator = tqdm(batch_iterator, desc=f"Processing epoch {epoch: 02d}", colour="BLUE")
@@ -140,7 +181,7 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset)
 
             if global_step % 200 == 0:
                 # Evaluate the model on the validation dataset(aka unseen data)
-                validation_loss += validate(model, val_batch_iterator, loss_func)
+                validation_loss += validate(model, val_dataset, loss_func)
                 
                 # Log the training and validation loss on tensorboard
                 writer.add_scalars("Cross-Entropy-Loss", { "Training": training_loss / (global_step + 1), "Validation": validation_loss / ((global_step + 1) // 200 + 1) }, global_step)
@@ -164,7 +205,7 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset)
             global_step += 1
         
         # Save the model at the end of every epoch
-        model_filename = f"{MODELS_FOLDER}/tmodel_avgTrainLoss-{training_loss / global_step:6.3f}_avgValLoss-{validation_loss / (global_step // 200 + 1):6.3f}.pt"
+        model_filename = f"{MODELS_FOLDER}/gpt_model-avgTrainLoss-{training_loss / global_step:6.3f}_avgValLoss-{validation_loss / (global_step // 200 + 1):6.3f}.pt"
         
         torch.save({
             "epoch": epoch,

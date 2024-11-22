@@ -23,5 +23,5 @@ DFF = 2048
 MODELS_FOLDER = "models"
 PRELOAD_MODEL_FILEPATH = ""
 TOKENIZER_FILEPATH = f"tokenizers/amharic-bpe-tokenizer-v1-{VOCAB_SIZE // 1000}k.json"
-TB_LOG_DIR = "logs"
+TB_LOG_DIR = "logs/gpt_model"
 DATASET_PATH = "data/amharic-texts.txt"

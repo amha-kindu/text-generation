@@ -9,7 +9,7 @@ from train import get_tokenizer
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout
 
 
-class MtInferenceEngine:
+class GptInferenceEngine:
     
     def __init__(self, model: GPTmodel, tokenizer: Tokenizer, top_k: int= 5, nucleus_threshold=10) -> None:
         self.model = model
@@ -26,7 +26,7 @@ class MtInferenceEngine:
         return (tensor == self.pad_id).nonzero()[0][1].item() - 1
        
     @torch.no_grad() 
-    def translate(self, text: str, max_len: int) -> str:
+    def complete(self, text: str, max_len: int) -> str:
         dataset = TextDataset(
             dataset=[text],
             tokenizer=self.tokenizer
@@ -46,13 +46,13 @@ class MtInferenceEngine:
         predicted_token = None
         while tokens < max_len:
             # (1, seq_len, d_model)
-            decoder_out = model.decode(decoder_input, decoder_mask)
+            decoder_out = self.model.decode(decoder_input, decoder_mask)
 
             # (1, d_model)
             temp = decoder_out[:, tokens + 1]
             
             # (1, d_model) --> (1, vocab_size)
-            logits = model.project(temp)
+            logits = self.model.project(temp)
             
             # Evaluate the probability distribution across the vocab_size 
             # dimension using softmax
@@ -75,7 +75,7 @@ class MtInferenceEngine:
 
 
 class TranslationApp(QWidget):
-    def __init__(self, inference_engine: MtInferenceEngine):
+    def __init__(self, inference_engine: GptInferenceEngine):
         super().__init__()
         self.init_ui()
         self.inference_engine = inference_engine
@@ -130,7 +130,7 @@ if __name__ == '__main__':
     print(f"Model Size(MB): {total_params * 4 / (1024 ** 2):.2f}MB")
     
     tokenizer: Tokenizer = get_tokenizer()
-    inference_engine = MtInferenceEngine(model, tokenizer)
+    inference_engine = GptInferenceEngine(model, tokenizer)
 
     translation_app = TranslationApp(inference_engine)
     translation_app.show()

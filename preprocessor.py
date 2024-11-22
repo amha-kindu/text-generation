@@ -1,23 +1,12 @@
 import re
-import nltk
 from tokenizers import Tokenizer
-from nltk.corpus import stopwords
 from abc import ABC, abstractmethod
-from nltk.tokenize import word_tokenize
-from nltk.stem import WordNetLemmatizer
 
 
 class PreprocessingPipeline(ABC):   
     def __init__(self, tokenizer: Tokenizer) -> None:
         super().__init__()
         self.tokenizer = tokenizer
-        
-    def tokenize(self, text):
-        """
-        Tokenize the input text into words.
-        """
-        words = word_tokenize(text)
-        return words
     
     @abstractmethod
     def preprocess(self, text: str, encode=True) -> str:
@@ -34,12 +23,6 @@ class AmharicPreprocessor(PreprocessingPipeline):
         
         # Replace commonly used abbreviations
         text = self.normalize_abbreviations(text)
-        
-        # Remove punctuations and special characters
-        # text = self.remove_punc_and_special_chars(text)
-        
-        # Remove non-amharic chars and arabic numbers
-        # text = self.remove_ascii_and_numbers(text)
         
         if encode:
             return self.tokenizer.encode(
