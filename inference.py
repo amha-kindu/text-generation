@@ -4,71 +4,58 @@ from config import *
 from PyQt5.QtGui import QFont
 from tokenizers import Tokenizer
 from model import GPTmodel
-from dataset import TextDataset
+from preprocessor import AmharicPreprocessor
 from train import get_tokenizer
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout
 
 
 class GptInferenceEngine:
-    
+
     def __init__(self, model: GPTmodel, tokenizer: Tokenizer, top_k: int= 5, nucleus_threshold=10) -> None:
         self.model = model
         self.top_k = top_k
         self.tokenizer = tokenizer
         self.nucleus_threshold = nucleus_threshold
-
-        self.sos_id = self.tokenizer.token_to_id("[SOS]")
         self.pad_id = self.tokenizer.token_to_id("[PAD]")
+        self.stop_id = self.tokenizer.token_to_id("።")
+        self.preprocessor = AmharicPreprocessor(tokenizer)
 
         self.model.eval()
 
-    def size(self, tensor: torch.Tensor) -> int:
-        return (tensor == self.pad_id).nonzero()[0][1].item() - 1
-       
-    @torch.no_grad() 
+    @torch.no_grad()
     def complete(self, text: str, max_len: int) -> str:
-        dataset = TextDataset(
-            dataset=[text],
-            tokenizer=self.tokenizer
-        )
-        batch_iterator = iter(dataset.batch_iterator(1))
-        batch = next(batch_iterator)
-        
-        # (1, 1, seq_len, seq_len) 
-        decoder_mask: torch.Tensor = batch["decoder_mask"].to(DEVICE)
+        token_ids = self.preprocessor.preprocess(text)
+        padding = SEQ_LEN - len(token_ids)
 
-        # (1, seq_len)
-        decoder_input: torch.Tensor = batch["decoder_input"].to(DEVICE)
+        # (1, SEQ_LEN)
+        decoder_input = torch.concat([
+            torch.tensor(token_ids, dtype=torch.int64),
+            torch.tensor([self.pad_id] * padding, dtype=torch.int64)
+        ]).unsqueeze(0).to(DEVICE)
 
-        tokens = self.size(decoder_input)
-
-        # Initialize the decoder input with the continue token
         predicted_token = None
-        while tokens < max_len:
-            # (1, seq_len, d_model)
-            decoder_out = self.model.decode(decoder_input, decoder_mask)
+        non_pad_tokens = len(token_ids)
+        while non_pad_tokens > 0 and non_pad_tokens < max_len and predicted_token != self.stop_id:
+            # (1, SEQ_LEN, VOCAB_SIZE)
+            logits = self.model(decoder_input)
 
-            # (1, d_model)
-            temp = decoder_out[:, tokens + 1]
-            
-            # (1, d_model) --> (1, vocab_size)
-            logits = self.model.project(temp)
-            
-            # Evaluate the probability distribution across the vocab_size 
-            # dimension using softmax
-            # (1, vocab_size)
-            probab_distribution = torch.softmax(logits, dim=1)
-            
+            # (1, VOCAB_SIZE)
+            next_token_logits = logits[:, non_pad_tokens - 1]
+
+            # Evaluate the probability distribution across the VOCAB_SIZE
+            # dimension using softmax - (1, VOCAB_SIZE)
+            probab_distribution = torch.softmax(next_token_logits, dim=1)
+
             # Greedily pick the token with the highest probability
             _, predicted_token = torch.max(probab_distribution, dim=1)
-            
-            # Add the predicted token to the decoder input for the subsequent iterations
-            decoder_input[0, tokens + 1] = predicted_token.item()
 
-            tokens += 1
+            # Add the predicted token to the decoder input for the subsequent iterations
+            decoder_input[:, non_pad_tokens] = predicted_token.item()
+
+            non_pad_tokens += 1
 
         # Remove the batch dimension
-        # (1, seq_len) ---> (seq_len,)
+        # (1, SEQ_LEN) ---> (SEQ_LEN,)
         decoder_input = decoder_input.squeeze(0)
 
         return self.tokenizer.decode(decoder_input.detach().cpu().tolist())

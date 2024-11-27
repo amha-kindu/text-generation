@@ -1,225 +1,208 @@
-import math
-import torch
+import torch, math
 import torch.nn as nn
-from config import D_MODEL, DEVICE, DFF, DROPOUT, HEADS, N_BLOCKS, SEQ_LEN
+from config import *
 
 
-class WordEmbedding(nn.Module):
-    def __init__(self, vocab_size: int) -> None:
+class Embedding(nn.Module):
+    def __init__(self) -> None:
         super().__init__()
-        self.vocab_size = vocab_size
-        self.embedding: nn.Embedding = nn.Embedding(vocab_size, D_MODEL)
-        
+        self.embedding = nn.Embedding(VOCAB_SIZE, D_MODEL)
+
+    # Input shape: x -> (N_BATCHES, SEQ_LEN)
+    # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # (batch, seq_len, 1) --> (batch, seq_len, d_model)
-        return self.embedding.forward(x) * math.sqrt(D_MODEL)
-    
-    
+        return self.embedding(x) * math.sqrt(D_MODEL)
+
+
 class PositionEncoder(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()        
-        self.dropout = nn.Dropout(DROPOUT)
-        
-        # (seq_len, d_model)
-        pe = torch.zeros(SEQ_LEN, D_MODEL)
-        
-        # (seq_len, 1)
-        pos = torch.arange(0, SEQ_LEN, dtype=torch.float).float().unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, D_MODEL, 2).float() * -(math.log(10000.0) / D_MODEL))
-
-        # PE(pos, 2i) = sin(pos / (10000 ^ (2i/d_model)))
-        pe[:, 0::2] = torch.sin(pos * div_term)
-
-        # PE(pos, 2i + 1) = cos(pos / (10000 ^ (2i/d_model)))
-        pe[:, 1::2] = torch.cos(pos * div_term)
-        
-        # (1, seq_len, d_model)
-        pe = pe.unsqueeze(0) 
-        
-        self.register_buffer('pe', pe)
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor: 
-        assert x.shape[1] <= SEQ_LEN, f"Input sequence length exceeds the position encoder's max sequence length  `{SEQ_LEN}`"
-
-        # (batch, seq_len, d_model) + (1, seq_len, d_model) --> (batch, seq_len, d_model)
-        return self.dropout(x + self.pe[:, :x.shape[1], :].requires_grad_(False))
-    
-    
-class FeedForwardBlock(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__()
-        self.linear_1 = nn.Linear(D_MODEL, DFF).to(DEVICE)
         self.dropout = nn.Dropout(DROPOUT)
-        self.linear_2 = nn.Linear(DFF, D_MODEL).to(DEVICE)
         
+        # (SEQ_LEN, 1)
+        pos = torch.arange(0, SEQ_LEN, dtype=torch.float).unsqueeze(1)
+
+        # (D_MODEL//2,)
+        div_term = torch.exp(torch.arange(0, D_MODEL, 2, dtype=torch.float) * -math.log(10000) / D_MODEL)
+
+        # (SEQ_LEN, D_MODEL)
+        self.pe: torch.Tensor = torch.zeros(SEQ_LEN, D_MODEL)
+
+        # PE(pos, 2i) = sin(pos / (10000 ^ (2i/dmodel)))
+        # PE(pos, 2i) = sin(pos * exp(-2i * log(10000) / dmodel))
+        self.pe[:, ::2] = torch.sin(pos * div_term)
+
+        # PE(pos, 2i+1) = cos(pos / (10000 ^ (2i/dmodel)))
+        # PE(pos, 2i+1) = cos(pos * exp(-2i * log(10000) / dmodel))
+        self.pe[:, 1::2] = torch.cos(pos * div_term)
+
+        # (SEQ_LEN, D_MODEL) --> (1, SEQ_LEN, D_MODEL)
+        self.pe = self.pe.unsqueeze(0)
+
+        self.register_buffer("pe_no_grad", self.pe)
+
+    # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL)
+    # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # (batch, seq_len, d_model) -> (batch, seq_len, dff) -> (batch, seq_len, d_model)
-        return self.linear_2(self.dropout(torch.relu(self.linear_1(x))))
-    
-    
+        return self.dropout(x + self.pe_no_grad.requires_grad_(False))
+
+
 class MultiHeadAttentionBlock(nn.Module):
-    def __init__(self) -> None:
-        assert D_MODEL % HEADS == 0, "d_model is not divisible by heads"
-        
-        super().__init__()
-        
-        self.d_k = D_MODEL // HEADS
-        
-        self.W_q = nn.Linear(D_MODEL, D_MODEL, bias=False).to(DEVICE)
-        self.W_k = nn.Linear(D_MODEL, D_MODEL, bias=False).to(DEVICE)
-        self.W_v = nn.Linear(D_MODEL, D_MODEL, bias=False).to(DEVICE)
+    def __init__(self):
+        assert D_MODEL % HEADS == 0, "D_MODEL is not divisible by heads"
 
-        self.W_o = nn.Linear(D_MODEL, D_MODEL, bias=False).to(DEVICE)
+        super().__init__()
+        self.d_head: int = D_MODEL // HEADS
+
+        self.Wq: nn.Linear = nn.Linear(D_MODEL, D_MODEL, bias=False)
+        self.Wk: nn.Linear = nn.Linear(D_MODEL, D_MODEL, bias=False)
+        self.Wv: nn.Linear = nn.Linear(D_MODEL, D_MODEL, bias=False)
+        self.Wo: nn.Linear = nn.Linear(D_MODEL, D_MODEL, bias=False)
+
         self.dropout = nn.Dropout(DROPOUT)
     
-    @staticmethod
-    def attention(
-        # (batch, head, seq_len, d_k)
-        query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, 
-        dropout: nn.Dropout=None, 
-        mask: torch.Tensor=None
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        d_k = query.shape[-1]
-        
-        # (batch, head, seq_len, d_k) @ (batch, head, d_k, seq_len) --> (batch, head, seq_len, seq_len)
-        attention_scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)        
+    # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL), mask -> (1, SEQ_LEN, SEQ_LEN)
+    # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
+    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        # (N_BATCHES, SEQ_LEN, D_MODEL) @ (D_MODEL, D_MODEL) --> (N_BATCHES, SEQ_LEN, D_MODEL)
+        query: torch.Tensor = self.Wq(x)
+        key: torch.Tensor = self.Wk(x)
+        value: torch.Tensor = self.Wv(x)
 
-        # The mask passed has two components:
-        # 1. A lookback mask that makes sure the output at a certain position can only depend on the tokens on from previous positions. (USED ONLY ON THE DECODER)
-        # 2. An ignore mask so that attention score for the padding token [PAD] is zero. (USED BOTH ON THE DECODER AND THE ENCODER)
-        # If a mask is passed then some of the attention scores are set to zero based on the mask.
+        # (N_BATCHES, SEQ_LEN, D_MODEL) --> (N_BATCHES, SEQ_LEN, HEADS, d_head) --> (N_BATCHES, HEADS, SEQ_LEN, d_head)
+        query = query.view(x.shape[0], x.shape[1], HEADS, -1).transpose(1, 2)
+        key = key.view(x.shape[0], x.shape[1], HEADS, -1).transpose(1, 2)
+        value = value.view(x.shape[0], x.shape[1], HEADS, -1).transpose(1, 2)
+
+        # (N_BATCHES, HEADS, SEQ_LEN, d_head) @ (N_BATCHES, HEADS, d_head, SEQ_LEN)
+        # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
+        attention_scores = (query @ key.transpose(2, 3)) / math.sqrt(self.d_head)
+
         if mask is not None:
-            attention_scores.masked_fill_(mask == 0, -1e09)
-            
-        # (batch, head, seq_len, seq_len) which applies softmax to the last dimension
-        # so that the sum of the probabilities along this dimension equals 1
-        attention_scores = attention_scores.softmax(dim=-1)
-        if dropout is not None:
-            attention_scores = dropout(attention_scores)
-        
-        # (batch, head, seq_len, seq_len) @ (batch, head, seq_len, d_k) --> (batch, head, seq_len, d_k)
-        return (attention_scores @ value), attention_scores
-    
-    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        # (batch, seq_len, d_model) @ (d_model, d_model) --> (batch, seq_len, d_model)
-        query: torch.Tensor = self.W_q(q) 
+            attention_scores.masked_fill_(mask == False, -1e09)
 
-        # (batch, seq_len, d_model) @ (d_model, d_model) --> (batch, seq_len, d_model)
-        key: torch.Tensor = self.W_k(k)   
+        # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
+        attention_scores = torch.softmax(
+            attention_scores, dim=-1
+        )
+
+        attention_scores = self.dropout(attention_scores)
+
+        # (N_BATCHES, head, SEQ_LEN, SEQ_LEN) @ (N_BATCHES, head, SEQ_LEN, d_head)
+        # (N_BATCHES, head, SEQ_LEN, d_head)
+        output: torch.Tensor = attention_scores @ value
+
+        # (N_BATCHES, head, SEQ_LEN, d_head) -> (N_BATCHES, SEQ_LEN, head, d_head)
+        output = output.transpose(1, 2)
+
+        # (N_BATCHES, SEQ_LEN, head, d_head) -> (N_BATCHES, SEQ_LEN, D_MODEL)
+        output = output.contiguous().view(x.shape[0], x.shape[1], -1)
         
-        # (batch, seq_len, d_model) @ (d_model, d_model) --> (batch, seq_len, d_model)
-        value: torch.Tensor = self.W_v(v) 
-        
-        # (batch, seq_len, d_model) --> (batch, seq_len, head, d_k) --> (batch, head, seq_len, d_k)
-        query = query.view(query.shape[0], query.shape[1], HEADS, self.d_k).transpose(1, 2)
-        key = key.view(key.shape[0], key.shape[1], HEADS, self.d_k).transpose(1, 2)
-        value = value.view(value.shape[0], value.shape[1], HEADS, self.d_k).transpose(1, 2)
-        
-        # Here has shape x = (batch, head, seq_len, d_k)
-        x, self.attention_scores = MultiHeadAttentionBlock.attention(query, key, value, self.dropout, mask)
-        
-        # (batch, head, seq_len, d_k) --> (batch, seq_len, head, d_k)
-        x = x.transpose(1, 2)
-        
-        # (batch, seq_len, head, d_k) --> (batch, seq_len, d_model)
-        x = x.contiguous().view(x.shape[0], -1, HEADS * self.d_k)
-        
-        # (batch, seq_len, d_model) --> (batch, seq_len, d_model)
-        return self.W_o(x)
+        return self.Wo(output)
     
-    
-class ResidualConnection(nn.Module):
-    def __init__(self) -> None:
+
+class FeedForwardBlock(nn.Module):
+    def __init__(self):
         super().__init__()
+        self.linear1 = nn.Linear(D_MODEL, DFF)
+        self.linear2 = nn.Linear(DFF, D_MODEL)
         self.dropout = nn.Dropout(DROPOUT)
-        self.norm = nn.LayerNorm(D_MODEL, device=DEVICE)
-        
-    def forward(self, x: torch.Tensor, sublayer: nn.Module) -> torch.Tensor:
-        return x + self.dropout(sublayer(self.norm(x)))
-        
-            
-class DecoderBlock(nn.Module):
-    def __init__(self, self_attention_block: MultiHeadAttentionBlock, feed_forward_block: FeedForwardBlock) -> None:
-        super().__init__()
-        self.self_attention_block = self_attention_block
-        self.feed_forward_block = feed_forward_block
-        self.dropout = nn.Dropout(DROPOUT)
-        self.residual_connections = nn.ModuleList([ResidualConnection() for _ in range(2)])
-        
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, mask))
-        # x = self.residual_connections[1](x, lambda x: self.self_attention_block(x, x, x, mask))
-        x = self.residual_connections[1](x, self.feed_forward_block)
-        return x
-       
-        
-class Decoder(nn.Module):
-    def __init__(self, decoder_blocks: nn.ModuleList) -> None:
-        super().__init__()
-        self.decoder_blocks = decoder_blocks
-        self.norm = nn.LayerNorm(D_MODEL, device=DEVICE)
-        
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        for layer in self.decoder_blocks:
-            x = layer(x, mask)
-        return self.norm(x)
-    
-    
-class ProjectionLayer(nn.Module):
-    def __init__(self, vocab_size: int) -> None:
-        super().__init__()
-        self.proj = nn.Linear(D_MODEL, vocab_size)
-        
+
+    # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL)
+    # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # (batch, seq_len, d_model) --> (batch, seq_len, vocab_size)
-        return self.proj(x)
-    
-    
-class GPTmodel(nn.Module):
-    def __init__(self, decoder: Decoder, embed: WordEmbedding, pos_encoder: PositionEncoder, projection_layer: ProjectionLayer) -> None:
-        super().__init__()
-        self.decoder = decoder
-        self.embed = embed
-        self.pos_encoder = pos_encoder
-        self.projection_layer = projection_layer
-    
-    def decode(self, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        target = self.embed(target)
-        target = self.pos_encoder(target)
-        return self.decoder(target, mask)
-    
-    def project(self, x: torch.Tensor):
-        return self.projection_layer(x)
+        return self.linear2(
+            self.dropout(
+                torch.relu(self.linear1(x))
+            )
+        )
+        
 
+class ResidualConnection(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layer_norm = nn.LayerNorm(D_MODEL)
+        self.dropout = nn.Dropout(DROPOUT)
+
+    # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL)
+    # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
+    def forward(self, x: torch.Tensor, sublayer: nn.Module):
+        return x + self.dropout(sublayer(self.layer_norm(x)))
+        
+
+class DecoderBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.attention_head_rc = ResidualConnection()
+        self.feed_forward_rc = ResidualConnection()
+
+        self.attention_head = MultiHeadAttentionBlock()
+        self.feed_forward = FeedForwardBlock()
+
+    # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL), mask -> (1, SEQ_LEN, SEQ_LEN)
+    # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
+    def forward(self, x: torch.Tensor, mask: torch.Tensor):
+        x = self.attention_head_rc(x, lambda x: self.attention_head(x, mask))
+        x = self.feed_forward_rc(x, self.feed_forward)
+        return x
+
+
+class Projection(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(D_MODEL, VOCAB_SIZE)
+
+    # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL)
+    # Output shape: (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x)
+
+
+class GPTmodel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.decoders = nn.ModuleList([DecoderBlock() for _ in range(N_BLOCKS)])
+        self.embedding = Embedding()
+        self.position_encoder = PositionEncoder()
+        self.projection = Projection()
+        self.layer_norm = nn.LayerNorm(D_MODEL)
+
+    # Input shape: x -> (N_BATCHES, SEQ_LEN)
+    # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
+    def _embed_and_encode_position(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.embedding(x)
+        return self.position_encoder(x)
+
+    # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL)
+    # Output shape: (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
+    def _project(self, x: torch.Tensor) -> torch.Tensor:
+        return self.projection(x)
+    
+    # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL), mask -> (1, SEQ_LEN, SEQ_LEN)
+    # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
+    def _decode(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        for decoder in self.decoders:
+            x = decoder(x, mask)
+        return self.layer_norm(x)
+
+    # Input shape: x -> (N_BATCHES, SEQ_LEN), mask -> (1, SEQ_LEN, SEQ_LEN)
+    # Output shape: (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
+    def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+        x = self._embed_and_encode_position(x)
+        x = self._decode(x, mask)
+        return self._project(x)
+    
     @staticmethod
     def build(
-        vocab_size: int,
         state: dict = None
     ):
-        embed = WordEmbedding(vocab_size)
-        pos_encoder = PositionEncoder()
-            
-        # Create N_BLOCKS number of decoders
-        decoder_blocks = []
-        for _ in range(N_BLOCKS):
-            self_attention_block = MultiHeadAttentionBlock()
-            feed_forward_block = FeedForwardBlock()
-            
-            decoder_blocks.append(
-                DecoderBlock(self_attention_block, feed_forward_block)
-            )
-            
-        decoder = Decoder(nn.ModuleList(decoder_blocks))        
-        projection_layer = ProjectionLayer(vocab_size)
-        
-        transformer = GPTmodel(decoder, embed, pos_encoder, projection_layer)
-        
-        # Initialize the parameters
-        for p in transformer.parameters():
-            if p.dim() > 1:
-                nn.init.xavier_uniform_(p)
+        model = GPTmodel()
 
-        if state:
-            transformer.load_state_dict(state)
+        if state is not None:
+            model.load_state_dict(state)
+        else:
+            for p in model.parameters():
+                if p.dim() > 1:
+                    nn.init.xavier_uniform_(p)
 
-        return transformer
+        return model
