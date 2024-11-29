@@ -11,7 +11,7 @@ from train import get_dataset
 def test(model: GPTmodel, test_dataset: TextDataset):
     model.eval()
 
-    loss_func = nn.CrossEntropyLoss(ignore_index=test_dataset.tokenizer.token_to_id('[PAD]'), label_smoothing=0.1).to(DEVICE)
+    loss_func = nn.CrossEntropyLoss(ignore_index=test_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(DEVICE)
 
     batch_iterator = tqdm(test_dataset.batch_iterator(BATCH_SIZE), desc=f"Evaluating model on test dataset", colour="GREEN")
 

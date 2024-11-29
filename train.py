@@ -2,48 +2,35 @@ import torch
 from config import *
 import torch.nn as nn
 from tqdm import tqdm
-from tokenizers import Tokenizer
 from model import GPTmodel
 from dataset import TextDataset
 from torch.utils.tensorboard import SummaryWriter
-from torch.utils.data import random_split, DataLoader
+from torch.utils.data import DataLoader
+import sentencepiece as spm
 
 
-def get_tokenizer() -> Tokenizer:
-    tokenizer: Tokenizer = Tokenizer.from_file(TOKENIZER_FILEPATH)
-    tokenizer.enable_truncation(max_length=SEQ_LEN)
+def get_tokenizer() -> spm.SentencePieceProcessor:
+    tokenizer: spm.SentencePieceProcessor = spm.SentencePieceProcessor()
+    tokenizer.LoadFromFile(TOKENIZER_FILEPATH)
     
     return tokenizer
 
 def get_dataset() -> tuple[TextDataset, TextDataset, TextDataset]:
-    with open(DATASET_PATH, 'r', encoding='utf-8') as file:
-        texts = file.readlines()
-    
-    train_size = int(0.8 * len(texts))
-    test_size = int(0.15 * len(texts))
-    val_size = len(texts) - train_size - test_size
-
-    generator = torch.Generator().manual_seed(3000)
-    train_test_raw, val_raw = random_split(texts, (train_size+test_size, val_size), generator=generator)
-    train_raw, test_raw = random_split(train_test_raw, (train_size, test_size), generator=generator)
-    
     tokenizer = get_tokenizer()
 
-    train_dataset = TextDataset(train_raw, tokenizer)
-    val_dataset = TextDataset(val_raw, tokenizer)
-    test_dataset = TextDataset(test_raw, tokenizer)
+    train_dataset = TextDataset(TRAINING_DATA_FILEPATH, tokenizer)
+    val_dataset = TextDataset(VALIDATION_DATA_FILEPATH, tokenizer)
+    test_dataset = TextDataset(TEST_DATA_FILEPATH, tokenizer)
     
     return train_dataset, val_dataset, test_dataset
     
     
 @torch.no_grad()
-def validate(model: GPTmodel, batch_iterator: DataLoader):
+def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func):
     model.eval()
 
-    loss_func = nn.CrossEntropyLoss(ignore_index=test_dataset.tokenizer.token_to_id('[PAD]'), label_smoothing=0.1).to(DEVICE)   
-
     val_loss = 0
-    for batch in batch_iterator:
+    for batch in val_batch_iterator:
         # (N_BATCHES, SEQ_LEN)
         decoder_input = batch["decoder_input"].to(DEVICE)
 
@@ -66,12 +53,12 @@ def validate(model: GPTmodel, batch_iterator: DataLoader):
         )
         val_loss += loss.item()
 
-    return val_loss / len(batch_iterator)
+    return val_loss / len(val_batch_iterator)
 
 
 def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset) -> None:   
     writer = SummaryWriter(TB_LOG_DIR)
-    optimizer = torch.optim.Adam(model.parameters(), lr=INIT_LR, eps=1e-09)
+    optimizer = torch.optim.Adam(model.parameters(), lr=INIT_LR, eps=1e-08)
     
     initial_epoch = 0
     global_step = 0
@@ -90,7 +77,7 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset)
         model.load_state_dict(state["model_state_dict"])
         optimizer.load_state_dict(state["optimizer_state_dict"])
 
-    loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.tokenizer.token_to_id('[PAD]'), label_smoothing=0.1).to(DEVICE)
+    loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(DEVICE)
 
     batch_iterator = train_dataset.batch_iterator(BATCH_SIZE)
 
@@ -118,7 +105,7 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset)
             # Compute the cross-entropy loss
             batch_loss = loss_func.forward(
                 # (N_BATCHES, SEQ_LEN, VOCAB_SIZE) --> (N_BATCHES * SEQ_LEN, VOCAB_SIZE)
-                logits.view(-1, train_dataset.tokenizer.get_vocab_size()),
+                logits.view(-1, train_dataset.tokenizer.vocab_size()),
 
                 # (N_BATCHES, SEQ_LEN) --> (N_BATCHES * SEQ_LEN, )
                 label.view(-1)
@@ -126,7 +113,7 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset)
             training_loss += batch_loss.item()
 
             if global_step % 200 == 0:
-                validation_loss += validate(model, val_batch_iterator)
+                validation_loss += validate(model, val_batch_iterator, loss_func)
 
                 writer.add_scalars(
                     "Loss", 

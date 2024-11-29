@@ -1,24 +1,37 @@
+from os import SEEK_SET
+from typing import Iterator
 import torch
 from config import *
-from tokenizers import Tokenizer
+import sentencepiece as spm
 from torch.utils.data import Dataset, DataLoader
 from preprocessor import AmharicPreprocessor
 from torch.utils.data.sampler import RandomSampler
 
 
 class TextDataset(Dataset):
-    def __init__(self, texts: list[str], tokenizer: Tokenizer) -> None:
+    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor) -> None:
         super().__init__()
-        self.texts: list[str] = texts
-
+        self.file = open(file_path, 'r', encoding='utf-8')
         self.tokenizer = tokenizer
         self.preprocessor = AmharicPreprocessor(tokenizer)
 
-        # (1,)
-        self.pad_token = torch.tensor([self.tokenizer.token_to_id("[PAD]")], dtype=torch.int64)
+        self.pad_token = torch.tensor([self.tokenizer.pad_id()], dtype=torch.int64)
+        self.sos_token = torch.tensor([self.tokenizer.bos_id()], dtype=torch.int64)
+        self.eos_token = torch.tensor([self.tokenizer.eos_id()], dtype=torch.int64)
+        
+        offset = 0
+        self.offsets = []
+        for line in self.file:
+            self.offsets.append(offset)
+            offset += len(line.encode('utf-8')) + 1
 
-    def __len__(self):
-        return len(self.texts)
+        self.file.seek(0, SEEK_SET)
+
+    def __del__(self):
+        self.file.close()
+
+    def __len__(self) -> int:
+        return len(self.offsets)
 
     def batch_iterator(self, batch_size: int) -> DataLoader:
         return DataLoader(self, batch_size, shuffle=True)
@@ -38,14 +51,24 @@ class TextDataset(Dataset):
         # 1 x size x size
         return torch.triu(torch.ones(1, size, size), diagonal=1).type(torch.int) == 0
 
-    def __getitem__(self, index) -> dict:
-        token_ids = self.preprocessor.preprocess(self.texts[index])
-        padding = SEQ_LEN - len(token_ids) + 1
+    def __getitem__(self, index) -> Iterator[dict]:
+        self.file.seek(self.offsets[index], SEEK_SET)
+        text = self.file.readline()
+        
+        # Preprocess and tokenize
+        token_ids = self.preprocessor.preprocess(text)
+        padding = SEQ_LEN - len(token_ids) - 2
 
         # (SEQ_LEN,)
         decoder_input = torch.concat([
-            # (len(token_ids) - 1,)
-            torch.tensor(token_ids[:-1], dtype=torch.int64),
+            # (1,)
+            self.sos_token,
+
+            # (len(token_ids),)
+            torch.tensor(token_ids, dtype=torch.int64),
+
+            # (1, )
+            self.eos_token,
 
             # (padding,)
             torch.tensor([self.pad_token] * padding, dtype=torch.int64)
@@ -53,8 +76,11 @@ class TextDataset(Dataset):
 
         # (SEQ_LEN,)
         label = torch.concat([
-            # (len(token_ids) - 1,)
+            # (len(token_ids),)
             torch.tensor(token_ids[1:], dtype=torch.int64),
+
+            # (2, )
+            torch.tensor([self.eos_token] * 2, dtype=torch.int64),
 
             # (padding,)
             torch.tensor([self.pad_token] * padding, dtype=torch.int64)

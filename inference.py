@@ -2,8 +2,8 @@ import sys
 import torch
 from config import *
 from PyQt5.QtGui import QFont
-from tokenizers import Tokenizer
 from model import GPTmodel
+import sentencepiece as spm
 from preprocessor import AmharicPreprocessor
 from train import get_tokenizer
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout
@@ -11,13 +11,13 @@ from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButto
 
 class GptInferenceEngine:
 
-    def __init__(self, model: GPTmodel, tokenizer: Tokenizer, top_k: int= 5, nucleus_threshold=10) -> None:
+    def __init__(self, model: GPTmodel, tokenizer: spm.SentencePieceProcessor, top_k: int= 5, nucleus_threshold=10) -> None:
         self.model = model
         self.top_k = top_k
         self.tokenizer = tokenizer
         self.nucleus_threshold = nucleus_threshold
-        self.pad_id = self.tokenizer.token_to_id("[PAD]")
-        self.stop_id = self.tokenizer.token_to_id("።")
+        self.pad_id = self.tokenizer.pad_id()
+        self.eos_id = self.tokenizer.eos_id()
         self.preprocessor = AmharicPreprocessor(tokenizer)
 
         self.model.eval()
@@ -35,7 +35,7 @@ class GptInferenceEngine:
 
         predicted_token = None
         non_pad_tokens = len(token_ids)
-        while non_pad_tokens > 0 and non_pad_tokens < max_len and predicted_token != self.stop_id:
+        while non_pad_tokens > 0 and non_pad_tokens < max_len and predicted_token != self.eos_id:
             # (1, SEQ_LEN, VOCAB_SIZE)
             logits = self.model(decoder_input)
 
@@ -58,7 +58,7 @@ class GptInferenceEngine:
         # (1, SEQ_LEN) ---> (SEQ_LEN,)
         decoder_input = decoder_input.squeeze(0)
 
-        return self.tokenizer.decode(decoder_input.detach().cpu().tolist())
+        return self.tokenizer.Decode(decoder_input.detach().cpu().tolist())
 
 
 class TranslationApp(QWidget):
@@ -116,7 +116,7 @@ if __name__ == '__main__':
     print(f"Trainable Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     print(f"Model Size(MB): {total_params * 4 / (1024 ** 2):.2f}MB")
     
-    tokenizer: Tokenizer = get_tokenizer()
+    tokenizer: spm.SentencePieceProcessor = get_tokenizer()
     inference_engine = GptInferenceEngine(model, tokenizer)
 
     translation_app = TranslationApp(inference_engine)
