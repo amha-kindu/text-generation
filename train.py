@@ -85,6 +85,7 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset)
     val_batch_iterator = val_dataset.random_samples(BATCH_SIZE, num_of_samples)
 
     for epoch in range(initial_epoch, EPOCHS):
+        torch.cuda.empty_cache()
         batch_iterator = tqdm(batch_iterator, desc=f"Processing epoch {epoch: 02d}", colour="BLUE")
         
         for batch in batch_iterator:
