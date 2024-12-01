@@ -1,6 +1,4 @@
-import torch, random, nltk
-
-nltk.download('stopwords')
+import torch, random, numpy
 
 torch.manual_seed(3000)
 if torch.cuda.is_available():
@@ -9,6 +7,7 @@ if torch.cuda.is_available():
 else:
     DEVICE = torch.device('cpu')
 random.seed(3000)
+numpy.random.seed(3000)
 
 VOCAB_SIZE=25000
 BATCH_SIZE = 64

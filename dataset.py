@@ -16,7 +16,6 @@ class TextDataset(Dataset):
         self.preprocessor = AmharicPreprocessor(tokenizer)
 
         self.pad_token = torch.tensor([self.tokenizer.pad_id()], dtype=torch.int64)
-        self.sos_token = torch.tensor([self.tokenizer.bos_id()], dtype=torch.int64)
         self.eos_token = torch.tensor([self.tokenizer.eos_id()], dtype=torch.int64)
         
         offset = 0
@@ -57,18 +56,13 @@ class TextDataset(Dataset):
         
         # Preprocess and tokenize
         token_ids = self.preprocessor.preprocess(text)
-        padding = SEQ_LEN - len(token_ids) - 2
+        token_ids = token_ids[:SEQ_LEN]
+        padding = SEQ_LEN - len(token_ids)
 
         # (SEQ_LEN,)
         decoder_input = torch.concat([
-            # (1,)
-            self.sos_token,
-
             # (len(token_ids),)
             torch.tensor(token_ids, dtype=torch.int64),
-
-            # (1, )
-            self.eos_token,
 
             # (padding,)
             torch.tensor([self.pad_token] * padding, dtype=torch.int64)
@@ -76,15 +70,15 @@ class TextDataset(Dataset):
 
         # (SEQ_LEN,)
         label = torch.concat([
-            # (len(token_ids),)
+            # (len(token_ids) - 1,)
             torch.tensor(token_ids[1:], dtype=torch.int64),
 
-            # (2, )
-            torch.tensor([self.eos_token] * 2, dtype=torch.int64),
+            # (1, )
+            torch.tensor([self.eos_token], dtype=torch.int64),
 
             # (padding,)
             torch.tensor([self.pad_token] * padding, dtype=torch.int64)
-        ])
+        ])[:SEQ_LEN]
 
         return {
             # (SEQ_LEN,)
