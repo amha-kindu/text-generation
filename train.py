@@ -106,7 +106,7 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset)
             # Compute the cross-entropy loss
             batch_loss = loss_func.forward(
                 # (N_BATCHES, SEQ_LEN, VOCAB_SIZE) --> (N_BATCHES * SEQ_LEN, VOCAB_SIZE)
-                logits.view(-1, train_dataset.tokenizer.vocab_size()),
+                logits.view(-1, VOCAB_SIZE),
 
                 # (N_BATCHES, SEQ_LEN) --> (N_BATCHES * SEQ_LEN, )
                 label.view(-1)
@@ -150,7 +150,7 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset)
             global_step += 1
         
         # Save the model at the end of every epoch
-        model_filename = f"{MODELS_FOLDER}/gpt_model-epoch_{epoch}-avg_train_loss_{training_loss / global_step:6.3f}-avg_val_loss_{validation_loss / (global_step // 200 + 1):6.3f}.pt"
+        model_filename = f"{MODELS_FOLDER}/amharic-gpt-model.pt"
         
         torch.save({
             "epoch": epoch,

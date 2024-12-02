@@ -23,7 +23,7 @@ class PositionEncoder(nn.Module):
         pos = torch.arange(0, SEQ_LEN, dtype=torch.float).unsqueeze(1)
 
         # (D_MODEL//2,)
-        div_term = torch.exp(torch.arange(0, D_MODEL, 2, dtype=torch.float) * -math.log(10000) / D_MODEL)
+        div_term = torch.exp(torch.arange(0, D_MODEL, 2, dtype=torch.float) * -math.log(10000.0) / D_MODEL)
 
         # (SEQ_LEN, D_MODEL)
         self.pe: torch.Tensor = torch.zeros(SEQ_LEN, D_MODEL)
@@ -133,17 +133,15 @@ class ResidualConnection(nn.Module):
 class DecoderBlock(nn.Module):
     def __init__(self):
         super().__init__()
-        self.attention_head_rc = ResidualConnection()
-        self.feed_forward_rc = ResidualConnection()
-
         self.attention_head = MultiHeadAttentionBlock()
         self.feed_forward = FeedForwardBlock()
+        self.residual_connections = nn.ModuleList([ResidualConnection() for _ in range(2)])
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
     def forward(self, x: torch.Tensor, mask: torch.Tensor):
-        x = self.attention_head_rc(x, lambda x: self.attention_head(x, mask))
-        x = self.feed_forward_rc(x, self.feed_forward)
+        x = self.residual_connections[0](x, lambda x: self.attention_head(x, mask))
+        x = self.residual_connections[1](x, self.feed_forward)
         return x
 
 
