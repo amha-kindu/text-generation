@@ -81,9 +81,6 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset)
 
     batch_iterator = train_dataset.batch_iterator(BATCH_SIZE)
 
-    num_of_samples = 10
-    val_batch_iterator = val_dataset.random_samples(BATCH_SIZE, num_of_samples)
-
     for epoch in range(initial_epoch, EPOCHS):
         torch.cuda.empty_cache()
         batch_iterator = tqdm(batch_iterator, desc=f"Processing epoch {epoch: 02d}", colour="BLUE")
@@ -114,6 +111,7 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset)
             training_loss += batch_loss.item()
 
             if global_step % 200 == 0:
+                val_batch_iterator = val_dataset.random_samples(BATCH_SIZE, 10)
                 validation_loss += validate(model, val_batch_iterator, loss_func)
 
                 writer.add_scalars(
