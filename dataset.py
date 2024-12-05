@@ -1,6 +1,7 @@
 from os import SEEK_SET
 from typing import Iterator
 import torch
+import json
 from config import *
 import sentencepiece as spm
 from torch.utils.data import Dataset, DataLoader
@@ -17,20 +18,12 @@ class TextDataset(Dataset):
 
         self.pad_token = torch.tensor([self.tokenizer.pad_id()], dtype=torch.int64)
         self.eos_token = torch.tensor([self.tokenizer.eos_id()], dtype=torch.int64)
-        
-        offset = 0
-        self.offsets = []
-        for line in self.file:
-            self.offsets.append(offset)
-            offset += len(line.encode('utf-8')) + 1
 
-        self.file.seek(0, SEEK_SET)
-
-    def __del__(self):
-        self.file.close()
+        with open(file_path, 'r', encoding='utf-8') as f:
+            self.sentences = json.loads(f.read())
 
     def __len__(self) -> int:
-        return len(self.offsets)
+        return len(self.sentences)
 
     def batch_iterator(self, batch_size: int) -> DataLoader:
         return DataLoader(self, batch_size, shuffle=True)
@@ -51,8 +44,7 @@ class TextDataset(Dataset):
         return torch.triu(torch.ones(1, size, size), diagonal=1).type(torch.int) == 0
 
     def __getitem__(self, index) -> Iterator[dict]:
-        self.file.seek(self.offsets[index], SEEK_SET)
-        text = self.file.readline()
+        text = self.sentences[index]
         
         # Preprocess and tokenize
         token_ids = self.preprocessor.preprocess(text)

@@ -58,7 +58,8 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func):
 
 def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset) -> None:   
     writer = SummaryWriter(TB_LOG_DIR)
-    optimizer = torch.optim.Adam(model.parameters(), lr=INIT_LR, eps=1e-08)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=INIT_LR, weight_decay=1e-2)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     
     initial_epoch = 0
     global_step = 0

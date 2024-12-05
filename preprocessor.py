@@ -16,10 +16,7 @@ class PreprocessingPipeline(ABC):
 class AmharicPreprocessor(PreprocessingPipeline):
     def __init__(self, tokenizer: spm.SentencePieceProcessor) -> None:
         super().__init__(tokenizer)
-        self.punc_and_special_chars = re.compile(r'[!@#$%^«»&*()…\[\]{};“”›’‘"\':,.‹/<>\?\|\`\´~\-=+፡።፤;፦፥፧፨፠፣፩፪፫፬፭፮፮፰፱፲፳፴፵፵፷፸፹፺፻01-9]')
         self.extra_whitespace = re.compile(r'\s{2,}')
-        self.ascii_and_numbers = re.compile('[A-Za-z0-9]')
-        self.non_amharic_chars=re.compile('[^\u1200-\u137F\s]+')
         self.normalization_patterns = [
             (re.compile('[ሃኅኃሐሓኻ]'), 'ሀ'),
             (re.compile('[ሑኁዅ]'), 'ሁ'),
@@ -78,11 +75,8 @@ class AmharicPreprocessor(PreprocessingPipeline):
         # Character level mismatch
         text = self.normalize_char_level_missmatch(text)
 
-        # Remove punctuations and special characters
-        text = self.remove_punc_and_special_chars(text)
-
-        # Remove non-amharic character
-        text = self.remove_ascii_and_numbers(text)
+        # Remove extra whitespace
+        text = self.extra_whitespace.sub(' ', text)
         
         if encode:
             return self.tokenizer.Encode(
@@ -96,13 +90,3 @@ class AmharicPreprocessor(PreprocessingPipeline):
         for pattern, replacement in self.normalization_patterns:
             text = pattern.sub(replacement, text)
         return text
-    
-    def remove_punc_and_special_chars(self, text: str) -> str:
-        text = self.punc_and_special_chars.sub(' ', text)
-        text = self.extra_whitespace.sub(' ', text)
-
-        return text
-
-    def remove_ascii_and_numbers(self, text: str) -> str:
-        rm_num_and_ascii = self.ascii_and_numbers.sub('', text)
-        return self.non_amharic_chars.sub('', rm_num_and_ascii)

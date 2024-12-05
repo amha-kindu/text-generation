@@ -1,4 +1,4 @@
-import os
+import os, json
 from config import *
 import sentencepiece as spm
 from typing import Generator, Iterator
@@ -17,8 +17,9 @@ class SentenceIterator(Iterator):
     
     def __gen__(self) -> Generator:
         with open(self.file_paths[self.current_file], 'r', encoding='utf-8') as f:
-            for line in f:
-                yield self.preprocessor.preprocess(line, encode=False)
+            sentences = json.loads(f.read())
+            for sentence in sentences:
+                yield self.preprocessor.preprocess(sentence, encode=False)
             self.current_file += 1
         yield None
 

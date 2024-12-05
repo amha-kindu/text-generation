@@ -7,11 +7,12 @@ class Embedding(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.embedding = nn.Embedding(VOCAB_SIZE, D_MODEL)
+        self.dropout = nn.Dropout(DROPOUT)
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.embedding(x) * math.sqrt(D_MODEL)
+        return self.dropout(self.embedding(x) * math.sqrt(D_MODEL))
 
 
 class PositionEncoder(nn.Module):
