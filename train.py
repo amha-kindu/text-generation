@@ -10,6 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 import sentencepiece as spm
 from torch.utils.data import DistributedSampler
+from torch.utils.data.sampler import RandomSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 
@@ -61,7 +62,6 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func):
 
 
 def train(rank: int, model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset, world_size: int, state=None) -> None:
-    distributed_training_setup(rank, world_size)
     model = DDP(model, device_ids=[rank])
 
     writer = SummaryWriter(TB_LOG_DIR)
@@ -85,7 +85,7 @@ def train(rank: int, model: GPTmodel, train_dataset: TextDataset, val_dataset: T
     sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
     batch_iterator = train_dataset.batch_iterator(BATCH_SIZE, sampler)
 
-    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
+    val_sampler = RandomSampler(val_dataset)
     val_batch_iterator = val_dataset.batch_iterator(BATCH_SIZE, val_sampler)
 
     for epoch in range(initial_epoch, EPOCHS):
@@ -157,26 +157,27 @@ def train(rank: int, model: GPTmodel, train_dataset: TextDataset, val_dataset: T
 
             global_step += 1
         
-        # Save the model at the end of every epoch
-        model_filename = f"{MODELS_FOLDER}/amharic-gpt-model.pt"
-        
-        torch.save({
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "global_step": global_step,
-            "training_loss": training_loss,
-            "validation_loss": validation_loss,
-            "model_hyperparams":{
-                "D_MODEL": D_MODEL,
-                "N_BLOCKS": N_BLOCKS,
-                "HEADS": HEADS,
-                "DROPOUT": DROPOUT,
-                "DFF": DFF,
-                "BATCH_SIZE": BATCH_SIZE,
-                "INIT_LR": INIT_LR
-            }
-        }, model_filename)
+        if rank == 0:
+            # Save the model at the end of every epoch
+            model_filename = f"{MODELS_FOLDER}/amharic-gpt-model.pt"
+            
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "global_step": global_step,
+                "training_loss": training_loss,
+                "validation_loss": validation_loss,
+                "model_hyperparams":{
+                    "D_MODEL": D_MODEL,
+                    "N_BLOCKS": N_BLOCKS,
+                    "HEADS": HEADS,
+                    "DROPOUT": DROPOUT,
+                    "DFF": DFF,
+                    "BATCH_SIZE": BATCH_SIZE,
+                    "INIT_LR": INIT_LR
+                }
+            }, model_filename)
 
 
 if __name__ == "__main__":

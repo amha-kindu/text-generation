@@ -9,6 +9,7 @@ else:
 random.seed(3000)
 numpy.random.seed(3000)
 
+WORKING_DIR="/workspace/text-generation"
 VOCAB_SIZE=25000
 BATCH_SIZE = 64
 EPOCHS = 100
@@ -19,10 +20,10 @@ N_BLOCKS = 6
 HEADS = 16
 DROPOUT = 0.1
 DFF = 2048
-MODELS_FOLDER = "models"
+MODELS_FOLDER = f"{WORKING_DIR}/models"
 PRELOAD_MODEL_FILEPATH = ""
-TOKENIZER_FILEPATH = f"tokenizers/amharic-bpe-tokenizer-{VOCAB_SIZE // 1000}k.model"
-TB_LOG_DIR = "logs/gpt_model"
-TRAINING_DATA_FILEPATH="data/train_chunk_size_255.json"
-VALIDATION_DATA_FILEPATH="data/validate_chunk_size_255.json"
-TEST_DATA_FILEPATH="data/test_chunk_size_255.json"
+TOKENIZER_FILEPATH = f"{WORKING_DIR}/tokenizers/amharic-bpe-tokenizer-{VOCAB_SIZE // 1000}k.model"
+TB_LOG_DIR = f"{WORKING_DIR}/logs/gpt_model"
+TRAINING_DATA_FILEPATH=f"{WORKING_DIR}/data/train_chunk_size_255.json"
+VALIDATION_DATA_FILEPATH=f"{WORKING_DIR}/data/validate_chunk_size_255.json"
+TEST_DATA_FILEPATH=f"{WORKING_DIR}/data/test_chunk_size_255.json"
