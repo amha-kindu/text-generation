@@ -209,12 +209,9 @@ if __name__ == "__main__":
         model.load_state_dict(state["model_state_dict"])
         state = {key: value for key, value in state.items() if key != "model_state_dict"}
 
-    os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29511'
-
     print("Initializing process group...")
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     print("Process group initialized...")
-    
+
     train(model, train_dataset, val_dataset, rank, world_size, state)
     dist.destroy_process_group()
