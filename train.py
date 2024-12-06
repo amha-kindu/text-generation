@@ -1,4 +1,6 @@
+import os
 import torch
+import torch.distributed as dist
 from config import *
 import torch.nn as nn
 from tqdm import tqdm
@@ -7,7 +9,14 @@ from dataset import TextDataset
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 import sentencepiece as spm
+from torch.utils.data import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
 
+
+def distributed_training_setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = '127.0.0.1'  # Local address
+    os.environ['MASTER_PORT'] = '29500'      # Port for communication
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def get_tokenizer() -> spm.SentencePieceProcessor:
     tokenizer: spm.SentencePieceProcessor = spm.SentencePieceProcessor()
@@ -56,8 +65,16 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func):
     return val_loss / len(val_batch_iterator)
 
 
-def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset) -> None:   
-    writer = SummaryWriter(TB_LOG_DIR)
+def train(rank: int, model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset, world_size: int, state=None) -> None:
+    distributed_training_setup(rank, world_size)
+    DEVICE = torch.device(f"cuda:{rank}")
+
+    model = model.to(DEVICE)
+    model = DDP(model, device_ids=[rank])
+
+    if rank == 1:
+        writer = SummaryWriter(TB_LOG_DIR)
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=INIT_LR, weight_decay=1e-2)
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     
@@ -65,26 +82,26 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset)
     global_step = 0
     training_loss = 0
     validation_loss = 0
-    if PRELOAD_MODEL_FILEPATH:
-        model_filename = f"{MODELS_FOLDER}/{PRELOAD_MODEL_FILEPATH}.pt"
-        print(f"Preloading model {model_filename}...")
-
-        state = torch.load(model_filename)
-        initial_epoch = state["epoch"] + 1
+    if state is not None:
+        initial_epoch = state["epoch"] + 1    
         global_step = state["global_step"]
         training_loss = state["training_loss"]
         validation_loss = state["validation_loss"]
-
-        model.load_state_dict(state["model_state_dict"])
         optimizer.load_state_dict(state["optimizer_state_dict"])
 
     loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(DEVICE)
 
-    batch_iterator = train_dataset.batch_iterator(BATCH_SIZE)
+    sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
+    batch_iterator = train_dataset.batch_iterator(BATCH_SIZE, sampler)
+
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
+    val_batch_iterator = val_dataset.batch_iterator(BATCH_SIZE, val_sampler)
 
     for epoch in range(initial_epoch, EPOCHS):
         torch.cuda.empty_cache()
-        batch_iterator = tqdm(batch_iterator, desc=f"Processing epoch {epoch: 02d}", colour="BLUE")
+        sampler.set_epoch(epoch)
+
+        batch_iterator = tqdm(batch_iterator, desc=f"GPU {rank} Processing epoch {epoch: 02d}")
         
         for batch in batch_iterator:
             model.train() 
@@ -111,28 +128,28 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset)
             )
             training_loss += batch_loss.item()
 
-            if global_step % 200 == 0:
-                val_batch_iterator = val_dataset.random_samples(BATCH_SIZE, 10)
-                validation_loss += validate(model, val_batch_iterator, loss_func)
+            if rank == 1:
+                if global_step % 200 == 0:
+                    validation_loss += validate(model, val_batch_iterator, loss_func)
 
-                writer.add_scalars(
-                    "Loss", 
-                    { 
-                        "Training": training_loss / (global_step + 1), 
-                        "Validation": validation_loss / ((global_step + 1) // 200 + 1) 
-                    },
-                    global_step
-                )
-            else:
-                writer.add_scalars(
-                    "Loss",
-                    {
-                        "Training": training_loss / (global_step + 1) 
-                    }, 
-                    global_step
-                )
-                
-            writer.flush()
+                    writer.add_scalars(
+                        "Loss", 
+                        { 
+                            "Training": training_loss / (global_step + 1), 
+                            "Validation": validation_loss / ((global_step + 1) // 200 + 1) 
+                        },
+                        global_step
+                    )
+                else:
+                    writer.add_scalars(
+                        "Loss",
+                        {
+                            "Training": training_loss / (global_step + 1) 
+                        }, 
+                        global_step
+                    )
+                    
+                writer.flush()
             
             batch_iterator.set_postfix({"train_loss": f"{training_loss / (global_step + 1):6.3f}", "val_loss": f"{validation_loss / ((global_step + 1) // 200 + 1):6.3f}"})
 
@@ -169,11 +186,24 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset)
             }
         }, model_filename)
 
+    dist.destroy_process_group()
+
 
 if __name__ == "__main__":
-    print(f"Training started on `{DEVICE}` device")
+    print(f"Training started on `{DEVICE}` device...")
+    world_size = torch.cuda.device_count()
+    print(f"Identified {world_size} GPUs...")
 
     train_dataset, val_dataset, _ = get_dataset()
-    model = GPTmodel.build().to(DEVICE) 
+    model = GPTmodel.build()
 
-    train(model, train_dataset, val_dataset)
+    state = None
+    if PRELOAD_MODEL_FILEPATH:
+        model_filename = f"{MODELS_FOLDER}/{PRELOAD_MODEL_FILEPATH}.pt"
+        print(f"Preloading model {model_filename}...")
+
+        state: dict = torch.load(model_filename)
+        model.load_state_dict(state["model_state_dict"])
+        state = {key: value for key, value in state.items() if key != "model_state_dict"}
+
+    torch.multiprocessing.spawn(train, args=(model, train_dataset, val_dataset, world_size, state,), nprocs=world_size)
