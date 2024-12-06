@@ -31,7 +31,7 @@ class GptInferenceEngine:
         decoder_input = torch.concat([
             torch.tensor(token_ids, dtype=torch.int64),
             torch.tensor([self.pad_id] * padding, dtype=torch.int64)
-        ]).unsqueeze(0).to(DEVICE)
+        ]).unsqueeze(0).to(LOCAL_RANK)
 
         predicted_token = None
         non_pad_tokens = len(token_ids)
@@ -106,15 +106,15 @@ class TranslationApp(QWidget):
 if __name__ == '__main__':
     app = QApplication(sys.argv)
 
-    state = torch.load("./models/tmodel-en-am-v1-20k.pt", map_location=DEVICE)
-    model = GPTmodel.build(VOCAB_SIZE, state).to(DEVICE)
+    state = torch.load("./models/tmodel-en-am-v1-20k.pt", map_location=LOCAL_RANK)
+    model = GPTmodel.build(VOCAB_SIZE, state).to(LOCAL_RANK)
 
     model.eval()
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"Device: {DEVICE}")
-    print(f"Total Parameters: {total_params}")
-    print(f"Trainable Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    print(f"Model Size(MB): {total_params * 4 / (1024 ** 2):.2f}MB")
+    LOGGER.info(f"Device: {LOCAL_RANK}")
+    LOGGER.info(f"Total Parameters: {total_params}")
+    LOGGER.info(f"Trainable Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    LOGGER.info(f"Model Size(MB): {total_params * 4 / (1024 ** 2):.2f}MB")
     
     tokenizer: spm.SentencePieceProcessor = get_tokenizer()
     inference_engine = GptInferenceEngine(model, tokenizer)

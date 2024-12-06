@@ -1,12 +1,10 @@
-from os import SEEK_SET
 from typing import Iterator
 import torch
 import json
 from config import *
 import sentencepiece as spm
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 from preprocessor import AmharicPreprocessor
-from torch.utils.data.sampler import RandomSampler
 
 
 class TextDataset(Dataset):
@@ -25,11 +23,8 @@ class TextDataset(Dataset):
     def __len__(self) -> int:
         return len(self.sentences)
 
-    def batch_iterator(self, batch_size: int) -> DataLoader:
-        return DataLoader(self, batch_size, shuffle=True)
-
-    def random_samples(self, batch_size: int, count: int) -> DataLoader:
-        return DataLoader(self, batch_size, sampler=RandomSampler(self, replacement=True, num_samples=count))
+    def batch_iterator(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
+        return DataLoader(self, batch_size, shuffle=(sampler is None), sampler=sampler)
 
     @staticmethod
     def lookback_mask(size: int) -> torch.Tensor:
