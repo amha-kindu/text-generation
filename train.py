@@ -72,8 +72,7 @@ def train(rank: int, model: GPTmodel, train_dataset: TextDataset, val_dataset: T
     model = model.to(DEVICE)
     model = DDP(model, device_ids=[rank])
 
-    if rank == 1:
-        writer = SummaryWriter(TB_LOG_DIR)
+    writer = SummaryWriter(TB_LOG_DIR)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=INIT_LR, weight_decay=1e-2)
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -128,27 +127,28 @@ def train(rank: int, model: GPTmodel, train_dataset: TextDataset, val_dataset: T
             )
             training_loss += batch_loss.item()
 
-            if rank == 1:
-                if global_step % 200 == 0:
-                    validation_loss += validate(model, val_batch_iterator, loss_func)
+            if rank == 1 and global_step % 200 == 0:
+                validation_loss += validate(model, val_batch_iterator, loss_func)
 
-                    writer.add_scalars(
-                        "Loss", 
-                        { 
-                            "Training": training_loss / (global_step + 1), 
-                            "Validation": validation_loss / ((global_step + 1) // 200 + 1) 
-                        },
-                        global_step
-                    )
-                else:
-                    writer.add_scalars(
-                        "Loss",
-                        {
-                            "Training": training_loss / (global_step + 1) 
-                        }, 
-                        global_step
-                    )
-                    
+                writer.add_scalars(
+                    "Loss", 
+                    { 
+                        "Validation": validation_loss / ((global_step + 1) // 200 + 1) 
+                    },
+                    global_step
+                )
+
+                writer.flush()
+
+            if rank == 0:
+                writer.add_scalars(
+                    "Loss",
+                    {
+                        "Training": training_loss / (global_step + 1) 
+                    }, 
+                    global_step
+                )
+                
                 writer.flush()
             
             batch_iterator.set_postfix({"train_loss": f"{training_loss / (global_step + 1):6.3f}", "val_loss": f"{validation_loss / ((global_step + 1) // 200 + 1):6.3f}"})
