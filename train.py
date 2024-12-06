@@ -190,6 +190,8 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset,
 
 if __name__ == "__main__":
     rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(rank)
+    
     world_size = torch.cuda.device_count()
     if rank == 0:
         print(f"Identified {world_size} GPUs...")
