@@ -3,7 +3,7 @@ import torch
 import json
 from config import *
 import sentencepiece as spm
-from torch.utils.data import Dataset, DataLoader, DistributedSampler
+from torch.utils.data import Dataset, DataLoader, Sampler
 from preprocessor import AmharicPreprocessor
 
 
@@ -23,8 +23,8 @@ class TextDataset(Dataset):
     def __len__(self) -> int:
         return len(self.sentences)
 
-    def batch_iterator(self, batch_size: int, sampler: DistributedSampler) -> DataLoader:
-        return DataLoader(self, batch_size=batch_size, sampler=sampler)
+    def batch_iterator(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
+        return DataLoader(self, batch_size, shuffle=(sampler is None), sampler=sampler)
 
     @staticmethod
     def lookback_mask(size: int) -> torch.Tensor:
