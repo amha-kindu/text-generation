@@ -13,11 +13,6 @@ from torch.utils.data import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 
-def distributed_training_setup(rank, world_size):
-    os.environ['MASTER_ADDR'] = '127.0.0.1'  # Local address
-    os.environ['MASTER_PORT'] = '29500'      # Port for communication
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-
 def get_tokenizer() -> spm.SentencePieceProcessor:
     tokenizer: spm.SentencePieceProcessor = spm.SentencePieceProcessor()
     tokenizer.LoadFromFile(TOKENIZER_FILEPATH)
@@ -67,9 +62,6 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func):
 
 def train(rank: int, model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset, world_size: int, state=None) -> None:
     distributed_training_setup(rank, world_size)
-    DEVICE = torch.device(f"cuda:{rank}")
-
-    model = model.to(DEVICE)
     model = DDP(model, device_ids=[rank])
 
     writer = SummaryWriter(TB_LOG_DIR)
@@ -186,16 +178,17 @@ def train(rank: int, model: GPTmodel, train_dataset: TextDataset, val_dataset: T
             }
         }, model_filename)
 
-    dist.destroy_process_group()
-
 
 if __name__ == "__main__":
     print(f"Training started on `{DEVICE}` device...")
     world_size = torch.cuda.device_count()
     print(f"Identified {world_size} GPUs...")
+    rank = int(os.environ["LOCAL_RANK"])
+   
+    DEVICE = torch.device(f"cuda:{rank}")
 
     train_dataset, val_dataset, _ = get_dataset()
-    model = GPTmodel.build()
+    model = GPTmodel.build().to(DEVICE)
 
     state = None
     if PRELOAD_MODEL_FILEPATH:
@@ -206,4 +199,8 @@ if __name__ == "__main__":
         model.load_state_dict(state["model_state_dict"])
         state = {key: value for key, value in state.items() if key != "model_state_dict"}
 
-    torch.multiprocessing.spawn(train, args=(model, train_dataset, val_dataset, world_size, state,), nprocs=world_size)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+    train(model, train_dataset, val_dataset, rank, world_size, state)
+
+    dist.destroy_process_group()
