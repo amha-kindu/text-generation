@@ -10,16 +10,16 @@ random.seed(3000)
 numpy.random.seed(3000)
 
 WORKING_DIR="/workspace/text-generation"
-VOCAB_SIZE=25000
+VOCAB_SIZE=32000
 BATCH_SIZE = 64
 EPOCHS = 100
 INIT_LR = 2e-04
 SEQ_LEN = 256
-D_MODEL = 512
+D_MODEL = 768
 N_BLOCKS = 6
 HEADS = 16
 DROPOUT = 0.1
-DFF = 2048
+DFF = 3078
 MODELS_FOLDER = f"{WORKING_DIR}/models"
 PRELOAD_MODEL_FILEPATH = ""
 TOKENIZER_FILEPATH = f"{WORKING_DIR}/tokenizers/amharic-bpe-tokenizer-{VOCAB_SIZE // 1000}k.model"

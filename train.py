@@ -61,8 +61,12 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func):
     return val_loss / len(val_batch_iterator)
 
 
-def train(rank: int, model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset, world_size: int, state=None) -> None:
-    model = DDP(model, device_ids=[rank])
+def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset, rank: int, world_size: int, state=None) -> None:
+    device = torch.device(f"cuda:{rank}")
+
+    print("Initiazing DDP...")
+    model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
+    print("DDP initialized.")
 
     writer = SummaryWriter(TB_LOG_DIR)
 
@@ -117,7 +121,11 @@ def train(rank: int, model: GPTmodel, train_dataset: TextDataset, val_dataset: T
                 # (N_BATCHES, SEQ_LEN) --> (N_BATCHES * SEQ_LEN, )
                 label.view(-1)
             )
-            training_loss += batch_loss.item()
+
+            total_loss_tensor: torch.Tensor = torch.tensor(batch_loss).to(rank)
+            dist.all_reduce(total_loss_tensor, op=dist.ReduceOp.SUM)
+
+            training_loss += total_loss_tensor.item() / dist.get_world_size()
 
             if rank == 1 and global_step % 200 == 0:
                 validation_loss += validate(model, val_batch_iterator, loss_func)
@@ -143,7 +151,7 @@ def train(rank: int, model: GPTmodel, train_dataset: TextDataset, val_dataset: T
                 
                 writer.flush()
             
-            batch_iterator.set_postfix({"train_loss": f"{training_loss / (global_step + 1):6.3f}", "val_loss": f"{validation_loss / ((global_step + 1) // 200 + 1):6.3f}"})
+                batch_iterator.set_postfix({"train_loss": f"{training_loss / (global_step + 1):6.3f}", "val_loss": f"{validation_loss / ((global_step + 1) // 200 + 1):6.3f}"})
 
             # Perform the backward pass on the computation graph built during the forward pass, 
             # in order to calculate the grad for each of the intermediate and leaf tensors on the computation graph
@@ -181,10 +189,10 @@ def train(rank: int, model: GPTmodel, train_dataset: TextDataset, val_dataset: T
 
 
 if __name__ == "__main__":
-    print(f"Training started on `{DEVICE}` device...")
-    world_size = torch.cuda.device_count()
-    print(f"Identified {world_size} GPUs...")
     rank = int(os.environ["LOCAL_RANK"])
+    world_size = torch.cuda.device_count()
+    if rank == 0:
+        print(f"Identified {world_size} GPUs...")
    
     DEVICE = torch.device(f"cuda:{rank}")
 
@@ -194,14 +202,16 @@ if __name__ == "__main__":
     state = None
     if PRELOAD_MODEL_FILEPATH:
         model_filename = f"{MODELS_FOLDER}/{PRELOAD_MODEL_FILEPATH}.pt"
-        print(f"Preloading model {model_filename}...")
+        if rank == 0:
+            print(f"Preloading model {model_filename}...")
 
         state: dict = torch.load(model_filename)
         model.load_state_dict(state["model_state_dict"])
         state = {key: value for key, value in state.items() if key != "model_state_dict"}
 
+    os.environ['MASTER_ADDR'] = '127.0.0.1'
+    os.environ['MASTER_PORT'] = '29511'
+
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
-
     train(model, train_dataset, val_dataset, rank, world_size, state)
-
     dist.destroy_process_group()
