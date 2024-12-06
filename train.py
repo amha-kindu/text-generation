@@ -63,7 +63,7 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func):
 
 def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset, rank: int, world_size: int, state=None) -> None:
     print("Initiazing DDP...")
-    model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
+    model = DDP(model, device_ids=[rank], output_device=rank)
     print("DDP initialized.")
 
     writer = SummaryWriter(TB_LOG_DIR)
@@ -194,7 +194,7 @@ if __name__ == "__main__":
     if rank == 0:
         print(f"Identified {world_size} GPUs...")
    
-    DEVICE = rank
+    DEVICE = torch.device(f"cuda:{rank}")
 
     train_dataset, val_dataset, _ = get_dataset()
     model = GPTmodel.build().to(DEVICE)
