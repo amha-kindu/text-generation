@@ -62,8 +62,6 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func):
 
 
 def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset, rank: int, world_size: int, state=None) -> None:
-    device = torch.device(f"cuda:{rank}")
-
     print("Initiazing DDP...")
     model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
     print("DDP initialized.")
@@ -191,12 +189,12 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset,
 if __name__ == "__main__":
     rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(rank)
-    
+
     world_size = torch.cuda.device_count()
     if rank == 0:
         print(f"Identified {world_size} GPUs...")
    
-    DEVICE = torch.device(f"cuda:{rank}")
+    DEVICE = rank
 
     train_dataset, val_dataset, _ = get_dataset()
     model = GPTmodel.build().to(DEVICE)
@@ -214,6 +212,9 @@ if __name__ == "__main__":
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '29511'
 
+    print("Initializing process group...")
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    print("Process group initialized...")
+    
     train(model, train_dataset, val_dataset, rank, world_size, state)
     dist.destroy_process_group()
