@@ -193,11 +193,11 @@ class GPTmodel(nn.Module):
     
     @staticmethod
     def build(
-        state: dict = None
+        state: dict = {}
     ):
         model = GPTmodel()
 
-        if state is not None:
+        if state:
             model.load_state_dict(state)
         else:
             for p in model.parameters():
