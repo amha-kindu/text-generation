@@ -7,7 +7,7 @@ from tqdm import tqdm
 from model import GPTmodel
 from dataset import TextDataset
 from torch.utils.tensorboard import SummaryWriter
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, RandomSampler
 import sentencepiece as spm
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
@@ -34,7 +34,7 @@ def get_dataset() -> tuple[TextDataset, TextDataset, TextDataset]:
 def test(model: GPTmodel, test_dataset: TextDataset, is_distributed: bool=False):
     model.eval()
 
-    loss_func = nn.CrossEntropyLoss(ignore_index=test_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(LOCAL_RANK)
+    loss_func = nn.CrossEntropyLoss(ignore_index=test_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(DEVICE)
 
     sampler = DistributedSampler(test_dataset, num_replicas=dist.get_world_size(), rank=LOCAL_RANK) if is_distributed else None
     batch_iterator = tqdm(test_dataset.batch_iterator(BATCH_SIZE,sampler=sampler), desc=f"Evaluating model on test dataset")
@@ -42,13 +42,13 @@ def test(model: GPTmodel, test_dataset: TextDataset, is_distributed: bool=False)
     evaluation_loss = 0
     for index, batch in enumerate(batch_iterator):
         # (N_BATCHES, SEQ_LEN)
-        decoder_input = batch["decoder_input"].to(LOCAL_RANK)
+        decoder_input = batch["decoder_input"].to(DEVICE)
 
         # (1, SEQ_LEN, SEQ_LEN)
-        decoder_mask = batch["decoder_mask"].to(LOCAL_RANK)
+        decoder_mask = batch["decoder_mask"].to(DEVICE)
 
         # (N_BATCHES, SEQ_LEN)
-        label: torch.Tensor = batch['label'].to(LOCAL_RANK)
+        label: torch.Tensor = batch['label'].to(DEVICE)
 
         # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
         logits: torch.Tensor = model.forward(decoder_input, decoder_mask)
@@ -75,13 +75,13 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func: nn.Cros
     val_loss = 0
     for batch in val_batch_iterator:
         # (N_BATCHES, SEQ_LEN)
-        decoder_input = batch["decoder_input"].to(LOCAL_RANK)
+        decoder_input = batch["decoder_input"].to(DEVICE)
 
         # (1, SEQ_LEN, SEQ_LEN)
-        decoder_mask = batch["decoder_mask"].to(LOCAL_RANK)
+        decoder_mask = batch["decoder_mask"].to(DEVICE)
 
         # (N_BATCHES, SEQ_LEN)
-        label: torch.Tensor = batch['label'].to(LOCAL_RANK)
+        label: torch.Tensor = batch['label'].to(DEVICE)
 
         # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
         logits: torch.Tensor = model.forward(decoder_input, decoder_mask)
@@ -101,9 +101,9 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func: nn.Cros
 
 def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset, is_distributed: bool = False) -> None:   
     writer = SummaryWriter(TB_LOG_DIR)
+
     IS_MASTER = (RANK == 0 and LOCAL_RANK == MASTER_LOCALRANK)
     IS_VALIDATOR = (RANK == 0 and LOCAL_RANK == VALIDATOR_LOCALRANK)
-
     if is_distributed:
         model = DDP(model, device_ids=[LOCAL_RANK])
 
@@ -125,36 +125,36 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset,
         validation_loss = state["validation_loss"]
         optimizer.load_state_dict(state["optimizer_state_dict"])
 
-    loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(LOCAL_RANK)
+    loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(DEVICE)
 
-    sampler = DistributedSampler(train_dataset, num_replicas=dist.get_world_size(), rank=dist.get_rank()) if is_distributed else None
+    sampler = DistributedSampler(train_dataset, shuffle=True) if is_distributed else None
     batch_iterator = train_dataset.batch_iterator(BATCH_SIZE, sampler=sampler)
 
-    val_sampler = DistributedSampler(val_dataset, num_replicas=1, rank=VALIDATOR_LOCALRANK) if is_distributed else None
+    val_sampler = RandomSampler(val_dataset, replacement=True, num_samples=10)
     val_batch_iterator = val_dataset.batch_iterator(BATCH_SIZE, sampler=val_sampler)
 
+    # LOGGER.info("Entering training loop...")
     for epoch in range(initial_epoch, EPOCHS):
         if is_distributed:
             sampler.set_epoch(epoch)
-
-        torch.cuda.empty_cache()
+        
         batch_iterator = tqdm(batch_iterator, desc=f"{LOGGER.name}: Processing epoch {epoch: 02d}")
         
         for batch in batch_iterator:
             model.train() 
                  
             # (N_BATCHES, SEQ_LEN)
-            decoder_input = batch["decoder_input"].to(LOCAL_RANK)
+            decoder_input = batch["decoder_input"].to(DEVICE)
 
             # (1, SEQ_LEN, SEQ_LEN)
-            decoder_mask = batch["decoder_mask"].to(LOCAL_RANK)
+            decoder_mask = batch["decoder_mask"].to(DEVICE)
             
             # (N_BATCHES, SEQ_LEN)
-            label: torch.Tensor = batch['label'].to(LOCAL_RANK)
+            label: torch.Tensor = batch['label'].to(DEVICE)
 
             # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
-            logits: torch.Tensor = model.forward(decoder_input, decoder_mask)
-                        
+            logits: torch.Tensor = model(decoder_input, decoder_mask)
+    
             # Compute the cross-entropy loss
             batch_loss = loss_func.forward(
                 # (N_BATCHES, SEQ_LEN, VOCAB_SIZE) --> (N_BATCHES * SEQ_LEN, VOCAB_SIZE)
@@ -181,7 +181,7 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset,
                         "Loss",
                         {
                             "Training": training_loss / global_step
-                        }, 
+                        },
                         global_step
                     )
                     
@@ -234,7 +234,7 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a GPT model")
-    parser.add_argument("--is-distributed", type=bool, default=False, help="Device to train the model on")
+    parser.add_argument("--is-distributed", type=bool, default=True, help="Device to train the model on")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="Batch size used during training")
     parser.add_argument("--init-lr", type=float, default=INIT_LR, help="Initial learning rate")
     parser.add_argument("--epochs", type=int, default=EPOCHS, help="Number of epochs to train the model")
@@ -253,14 +253,15 @@ if __name__ == "__main__":
     LOGGER.name = "GPU" if torch.cuda.is_available() else "CPU"
     if args.is_distributed:
         assert args.dist_backend in ["nccl", "gloo"], "Distributed backend must be either nccl or gloo"
+        RANK = int(os.environ["RANK"])
+        LOCAL_RANK = int(os.environ["LOCAL_RANK"])
+        DEVICE = torch.device(f"cuda:{LOCAL_RANK}")
+        torch.cuda.set_device(DEVICE)
 
+        LOGGER.info("Initializing Process Group...")
         dist.init_process_group(backend=args.dist_backend)
 
-        RANK = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
-        LOCAL_RANK = int(os.environ["LOCAL_RANK"])
-        LOGGER.name = "GPU {RANK}:{LOCAL_RANK}" if torch.cuda.is_available() else "CPU {RANK}:{LOCAL_RANK}"
+        LOGGER.name = f"GPU {RANK}" if torch.cuda.is_available() else f"CPU {RANK}"
 
         assert args.master_localrank != args.validator_localrank, "master local rank and validator local rank must be different"
         assert args.master_localrank < dist.get_world_size(), "master local rank must be less than world size"

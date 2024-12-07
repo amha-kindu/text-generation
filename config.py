@@ -4,17 +4,19 @@ import torch, random, numpy
 
 torch.manual_seed(3000)
 if torch.cuda.is_available():
-    LOCAL_RANK = torch.device('cuda')
+    DEVICE = torch.device('cuda')
     torch.cuda.manual_seed_all(3000)
 else:
-    LOCAL_RANK = torch.device('cpu')
+    DEVICE = torch.device('cpu')
 random.seed(3000)
 numpy.random.seed(3000)
 
-LOGGER = logging.getLogger(str(LOCAL_RANK).upper())
+LOGGER = logging.getLogger(str(DEVICE).upper())
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")
 
 WORKING_DIR = "/workspace/text-generation"
+RANK = 0
+LOCAL_RANK = 0
 VOCAB_SIZE = 32000
 BATCH_SIZE = 64
 EPOCHS = 100
