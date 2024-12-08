@@ -52,8 +52,8 @@ class TrainingConfig(Config):
         self.tb_log_dir: str = kwargs.get("tb_log_dir", "logs")
         self.validation_samples: int = kwargs.get("validation_samples", 20)
         self.training_data: str = kwargs.get("training_data", os.path.join(WORKING_DIR, "data", "train_chunk_size_256.json"))
-        self.validation_data: str = kwargs.get("training_data", os.path.join(WORKING_DIR, "data", "validate_chunk_size_256.json"))
-        self.testing_data: str = kwargs.get("training_data", os.path.join(WORKING_DIR, "data", "test_chunk_size_256.json"))
+        self.validation_data: str = kwargs.get("validation_data", os.path.join(WORKING_DIR, "data", "validate_chunk_size_256.json"))
+        self.testing_data: str = kwargs.get("testing_data", os.path.join(WORKING_DIR, "data", "test_chunk_size_256.json"))
 
 DEFAULT_TRAINING_CONFIG = TrainingConfig()
 DEFAULT_MODEL_CONFIG = ModelConfig()
