@@ -263,10 +263,14 @@ if __name__ == "__main__":
     HEADS = args.heads
     DFF = args.dff
 
+    os.makedirs(WEIGHTS_DIRECTORY, exist_ok=True)
     train_dataset, val_dataset, test_dataset = get_dataset()
 
     state, weights = {}, {}
     if PRELOAD_WEIGHTS_FILEPATH:
+        if not os.path.exists(PRELOAD_WEIGHTS_FILEPATH):
+            raise FileNotFoundError(f"File {PRELOAD_WEIGHTS_FILEPATH} does not exist")
+        
         LOGGER.info(f"Preloading model weights {PRELOAD_WEIGHTS_FILEPATH}...")
         state: dict = torch.load(PRELOAD_WEIGHTS_FILEPATH, map_location=DEVICE)
         weights = state["model_state_dict"]
