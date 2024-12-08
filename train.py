@@ -142,27 +142,25 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
             )
             training_loss += batch_loss.item()
 
-            if IS_MASTER and global_step % 200 == 0:
-                validation_loss += validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
+            if IS_MASTER:
+                if global_step % 200 == 0:
+                    validation_loss += validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
 
-                writer.add_scalars(
-                    "Loss", 
-                    { 
-                        "Training": training_loss / (global_step + 1), 
-                        "Validation": validation_loss / ((global_step + 1) // 200 + 1)
-                    },
-                    global_step
-                )
-            else:
                     writer.add_scalars(
-                        "Loss",
-                        {
-                            "Training": training_loss / (global_step + 1)
+                        "Loss", 
+                        { 
+                            "Validation": validation_loss / ((global_step + 1) // 200 + 1)
                         },
                         global_step
                     )
-     
-            writer.flush()
+                writer.add_scalars(
+                    "Loss",
+                    {
+                        "Training": training_loss / (global_step + 1)
+                    },
+                    global_step
+                )
+                writer.flush()
 
             batch_iterator.set_postfix({
                 "train_loss": f"{training_loss / (global_step + 1):6.3f}", 
