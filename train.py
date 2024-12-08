@@ -254,6 +254,7 @@ if __name__ == "__main__":
 
     assert args.d_model % args.heads == 0, "d_model must be divisible by heads"
 
+    TOKENIZER_FILEPATH = f"{WORKING_DIR}/tokenizers/amharic-bpe-tokenizer-{args.vocab_size // 1000}k.model"
     PRELOAD_WEIGHTS_FILEPATH = args.preload_weights
     VALIDATION_SAMPLES = args.validation_samples
     BATCH_SIZE = args.batch_size
