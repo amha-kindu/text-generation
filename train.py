@@ -125,7 +125,7 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset,
     sampler = DistributedSampler(train_dataset, shuffle=True) if is_distributed else None
     batch_iterator = train_dataset.batch_iterator(BATCH_SIZE, sampler=sampler)
 
-    val_sampler = RandomSampler(val_dataset, replacement=True, num_samples=10)
+    val_sampler = RandomSampler(val_dataset, replacement=True, num_samples=VALIDATION_SAMPLES)
     val_batch_iterator = val_dataset.batch_iterator(BATCH_SIZE, sampler=val_sampler)
 
     for epoch in range(initial_epoch, EPOCHS):
@@ -233,6 +233,7 @@ if __name__ == "__main__":
     parser.add_argument("--dff", type=int, default=DFF, help="Dimensionality of the feed forward layer")
     parser.add_argument("--dist-backend", type=str, default="nccl", help="Distributed backend")
     parser.add_argument("--preload-weights", type=str, default="", help="File path to load saved weights")
+    parser.add_argument("--validation-samples", type=int, default=VALIDATION_SAMPLES, help="Number of samples to use for a single validation run")
 
     args = parser.parse_args()
 
@@ -253,6 +254,7 @@ if __name__ == "__main__":
     assert args.d_model % args.heads == 0, "d_model must be divisible by heads"
 
     PRELOAD_WEIGHTS_FILEPATH = args.preload_weights
+    VALIDATION_SAMPLES = args.validation_samples
     BATCH_SIZE = args.batch_size
     N_BLOCKS = args.n_blocks
     SEQ_LEN = args.seq_len
