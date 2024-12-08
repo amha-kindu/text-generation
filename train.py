@@ -221,7 +221,7 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a GPT model")
-    parser.add_argument("--is-distributed", type=bool, default=True, help="Device to train the model on")
+    parser.add_argument("--is-distributed", action="store_true", help="Device to train the model on")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="Batch size used during training")
     parser.add_argument("--init-lr", type=float, default=INIT_LR, help="Initial learning rate")
     parser.add_argument("--epochs", type=int, default=EPOCHS, help="Number of epochs to train the model")
