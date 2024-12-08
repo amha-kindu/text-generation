@@ -229,6 +229,7 @@ if __name__ == "__main__":
     parser.add_argument("--d-model", type=int, default=D_MODEL, help="Dimensionality of the model")
     parser.add_argument("--n-blocks", type=int, default=N_BLOCKS, help="Number of decoder blocks")
     parser.add_argument("--heads", type=int, default=HEADS, help="Number of attention heads")
+    parser.add_argument("--vocab-size", type=int, default=VOCAB_SIZE, help="Vocabulary size to use")
     parser.add_argument("--dropout", type=float, default=DROPOUT, help="Dropout probability")
     parser.add_argument("--dff", type=int, default=DFF, help="Dimensionality of the feed forward layer")
     parser.add_argument("--dist-backend", type=str, default="nccl", help="Distributed backend")
@@ -256,6 +257,7 @@ if __name__ == "__main__":
     PRELOAD_WEIGHTS_FILEPATH = args.preload_weights
     VALIDATION_SAMPLES = args.validation_samples
     BATCH_SIZE = args.batch_size
+    VOCAB_SIZE = args.vocab_size
     N_BLOCKS = args.n_blocks
     SEQ_LEN = args.seq_len
     INIT_LR = args.init_lr
