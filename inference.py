@@ -1,17 +1,16 @@
 import sys
 import torch
 from config import *
-from PyQt5.QtGui import QFont
 from model import GPTmodel
-import sentencepiece as spm
+from PyQt5.QtGui import QFont
 from preprocessor import AmharicPreprocessor
-from train import get_tokenizer
+from tokenizer import SentencePieceProcessor
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout
 
 
 class GptInferenceEngine:
 
-    def __init__(self, model: GPTmodel, tokenizer: spm.SentencePieceProcessor, top_k: int= 5, nucleus_threshold=10) -> None:
+    def __init__(self, model: GPTmodel, tokenizer: SentencePieceProcessor, top_k: int= 5, nucleus_threshold=10) -> None:
         self.model = model
         self.top_k = top_k
         self.tokenizer = tokenizer
@@ -25,7 +24,7 @@ class GptInferenceEngine:
     @torch.no_grad()
     def complete(self, text: str, max_len: int) -> str:
         token_ids = self.preprocessor.preprocess(text)
-        padding = SEQ_LEN - len(token_ids)
+        padding = model.config.seq_len - len(token_ids)
 
         # (1, SEQ_LEN)
         decoder_input = torch.concat([
@@ -103,20 +102,35 @@ class TranslationApp(QWidget):
         prediction: str = self.inference_engine.translate(input_text, 10)
         self.output_textbox.setText(prediction)
 
-if __name__ == '__main__':
-    app = QApplication(sys.argv)
+import argparse
 
-    state = torch.load("./models/tmodel-en-am-v1-20k.pt", map_location=LOCAL_RANK)
-    model = GPTmodel.build(VOCAB_SIZE, state).to(LOCAL_RANK)
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Train a GPT model")
+    parser.add_argument("--preload-weights", type=str, required=True, help="File path to load saved weights")
+
+    args = parser.parse_args()
+
+    if not os.path.exists(args.preload_weights):
+        raise FileNotFoundError(f"File {args.preload_weights} does not exist")
+    
+    LOGGER.info(f"Preloading model weights {args.preload_weights}...")
+    checkpoint: dict = torch.load(args.preload_weights, map_location=DEVICE)
+
+    model_config = ModelConfig(checkpoint["model_config"])
+
+    app = QApplication(sys.argv)
+    model = GPTmodel.build(model_config, checkpoint["model_state_dict"]).to(DEVICE)
 
     model.eval()
     total_params = sum(p.numel() for p in model.parameters())
-    LOGGER.info(f"Device: {LOCAL_RANK}")
+    LOGGER.info(f"Device: {DEVICE}")
     LOGGER.info(f"Total Parameters: {total_params}")
     LOGGER.info(f"Trainable Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     LOGGER.info(f"Model Size(MB): {total_params * 4 / (1024 ** 2):.2f}MB")
     
-    tokenizer: spm.SentencePieceProcessor = get_tokenizer()
+    tokenizer = SentencePieceProcessor.LoadFromFile(
+        f"{WORKING_DIR}/tokenizers/amharic-bpe-tokenizer-{model_config.vocab_size // 1000}k.model"
+    )
     inference_engine = GptInferenceEngine(model, tokenizer)
 
     translation_app = TranslationApp(inference_engine)

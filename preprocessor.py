@@ -1,10 +1,10 @@
 import re
-import sentencepiece as spm
 from abc import ABC, abstractmethod
+from tokenizer import SentencePieceProcessor
 
 
 class PreprocessingPipeline(ABC):   
-    def __init__(self, tokenizer: spm.SentencePieceProcessor) -> None:
+    def __init__(self, tokenizer: SentencePieceProcessor) -> None:
         super().__init__()
         self.tokenizer = tokenizer
     
@@ -14,7 +14,7 @@ class PreprocessingPipeline(ABC):
 
     
 class AmharicPreprocessor(PreprocessingPipeline):
-    def __init__(self, tokenizer: spm.SentencePieceProcessor) -> None:
+    def __init__(self, tokenizer: SentencePieceProcessor) -> None:
         super().__init__(tokenizer)
         self.extra_whitespace = re.compile(r'\s{2,}')
         self.normalization_patterns = [

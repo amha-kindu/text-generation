@@ -6,39 +6,23 @@ import torch.nn as nn
 from tqdm import tqdm
 from model import GPTmodel
 from dataset import TextDataset
-from torch.utils.tensorboard import SummaryWriter
-from torch.utils.data import DataLoader, RandomSampler
-import sentencepiece as spm
 import torch.distributed as dist
-from torch.utils.data.distributed import DistributedSampler
+from torch.utils.tensorboard import SummaryWriter
+from tokenizer import SentencePieceProcessor
+from torch.utils.data import DataLoader, RandomSampler
 from torch.nn.parallel import DistributedDataParallel
-
-
-def get_tokenizer() -> spm.SentencePieceProcessor:
-    tokenizer: spm.SentencePieceProcessor = spm.SentencePieceProcessor()
-    tokenizer.LoadFromFile(TOKENIZER_FILEPATH)
-    
-    return tokenizer
-
-def get_dataset() -> tuple[TextDataset, TextDataset, TextDataset]:
-    tokenizer = get_tokenizer()
-
-    train_dataset = TextDataset(TRAINING_DATA_FILEPATH, tokenizer)
-    val_dataset = TextDataset(VALIDATION_DATA_FILEPATH, tokenizer)
-    test_dataset = TextDataset(TEST_DATA_FILEPATH, tokenizer)
-    
-    return train_dataset, val_dataset, test_dataset
+from torch.utils.data.distributed import DistributedSampler
 
 
 @torch.no_grad()
-def test(model: GPTmodel, test_dataset: TextDataset, is_distributed: bool=False):
+def test(config: TrainingConfig, model: GPTmodel, test_dataset: TextDataset, is_distributed: bool=False):
     model.eval()
     IS_MASTER = GLOBAL_RANK == MASTER_RANK
 
     loss_func = nn.CrossEntropyLoss(ignore_index=test_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(DEVICE)
 
     sampler = DistributedSampler(test_dataset, num_replicas=dist.get_world_size(), rank=LOCAL_RANK) if is_distributed else None
-    batch_iterator = tqdm(test_dataset.batch_iterator(BATCH_SIZE,sampler=sampler), desc=f"Evaluating model on test dataset", disable=not IS_MASTER)
+    batch_iterator = tqdm(test_dataset.batch_iterator(config.batch_size, sampler=sampler), desc=f"Evaluating model on test dataset", disable=not IS_MASTER)
 
     evaluation_loss = 0
     for index, batch in enumerate(batch_iterator):
@@ -52,12 +36,12 @@ def test(model: GPTmodel, test_dataset: TextDataset, is_distributed: bool=False)
         label: torch.Tensor = batch['label'].to(DEVICE)
 
         # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
-        logits: torch.Tensor = model.forward(decoder_input, decoder_mask)
+        logits: torch.Tensor = model(decoder_input, decoder_mask)
 
         # Compute the training loss
         test_loss: torch.Tensor = loss_func(
             # (N_BATCHES, SEQ_LEN, VOCAB_SIZE) --> (N_BATCHES * SEQ_LEN, VOCAB_SIZE)
-            logits.view(-1, VOCAB_SIZE),
+            logits.view(-1, model.config.vocab_size),
 
             # (N_BATCHES, SEQ_LEN) --> (N_BATCHES * SEQ_LEN, )
             label.view(-1)
@@ -89,7 +73,7 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func: nn.Cros
         # Compute the cross-entropy loss
         loss: torch.Tensor = loss_func(
             # (N_BATCHES, SEQ_LEN, VOCAB_SIZE) --> (N_BATCHES * SEQ_LEN, VOCAB_SIZE)
-            logits.view(-1, VOCAB_SIZE),
+            logits.view(-1, model.config.vocab_size),
 
             # (N_BATCHES, SEQ_LEN) --> (N_BATCHES * SEQ_LEN, )
             label.view(-1)
@@ -99,14 +83,14 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func: nn.Cros
     return val_loss / len(val_batch_iterator)
 
 
-def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset, is_distributed: bool = False, state: dict = {}) -> None:   
+def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset, is_distributed: bool = False, state: dict = {}) -> None:
     IS_MASTER = GLOBAL_RANK == MASTER_RANK
-    writer = SummaryWriter(TB_LOG_DIR)
+    writer = SummaryWriter(config.tb_log_dir)
 
     if is_distributed:
         model = DistributedDataParallel(model, device_ids=[LOCAL_RANK])
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=INIT_LR, weight_decay=1e-2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.init_lr, weight_decay=1e-2)
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     
     initial_epoch = 0
@@ -123,12 +107,12 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset,
     loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(DEVICE)
 
     sampler = DistributedSampler(train_dataset, shuffle=True) if is_distributed else None
-    batch_iterator = train_dataset.batch_iterator(BATCH_SIZE, sampler=sampler)
+    batch_iterator = train_dataset.batch_iterator(config.batch_size, sampler=sampler)
 
-    val_sampler = RandomSampler(val_dataset, replacement=True, num_samples=VALIDATION_SAMPLES)
-    val_batch_iterator = val_dataset.batch_iterator(BATCH_SIZE, sampler=val_sampler)
+    val_sampler = RandomSampler(val_dataset, replacement=True, num_samples=config.validation_samples)
+    val_batch_iterator = val_dataset.batch_iterator(config.batch_size, sampler=val_sampler)
 
-    for epoch in range(initial_epoch, EPOCHS):
+    for epoch in range(initial_epoch, config.epochs):
         if is_distributed:
             sampler.set_epoch(epoch)
         
@@ -147,11 +131,11 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset,
 
             # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
             logits: torch.Tensor = model(decoder_input, decoder_mask)
-    
+
             # Compute the cross-entropy loss
             batch_loss = loss_func.forward(
                 # (N_BATCHES, SEQ_LEN, VOCAB_SIZE) --> (N_BATCHES * SEQ_LEN, VOCAB_SIZE)
-                logits.view(-1, VOCAB_SIZE),
+                logits.view(-1, train_dataset.tokenizer.vocab_size()),
 
                 # (N_BATCHES, SEQ_LEN) --> (N_BATCHES * SEQ_LEN, )
                 label.view(-1)
@@ -159,7 +143,7 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset,
             training_loss += batch_loss.item()
 
             if IS_MASTER and global_step % 200 == 0:
-                validation_loss += validate(model.module, val_batch_iterator, loss_func)
+                validation_loss += validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
 
                 writer.add_scalars(
                     "Loss", 
@@ -201,20 +185,14 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset,
             model_filename = f"{WEIGHTS_DIRECTORY}/amharic-gpt-base-model-v1.pt"        
             torch.save({
                 "epoch": epoch,
-                "model_state_dict": model.module.state_dict(),
+                "batch_size": config.batch_size,
+                "initial_learning_rate": config.init_lr,
+                "model_state_dict": model.module.state_dict() if is_distributed else model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "global_step": global_step,
                 "training_loss": training_loss,
                 "validation_loss": validation_loss,
-                "model_hyperparams":{
-                    "D_MODEL": D_MODEL,
-                    "N_BLOCKS": N_BLOCKS,
-                    "HEADS": HEADS,
-                    "DROPOUT": DROPOUT,
-                    "DFF": DFF,
-                    "BATCH_SIZE": BATCH_SIZE,
-                    "INIT_LR": INIT_LR
-                }
+                "model_config": model.module.config if is_distributed else model.config
             }, model_filename)
 
 
@@ -222,19 +200,23 @@ def train(model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a GPT model")
     parser.add_argument("--is-distributed", action="store_true", help="Device to train the model on")
-    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="Batch size used during training")
-    parser.add_argument("--init-lr", type=float, default=INIT_LR, help="Initial learning rate")
-    parser.add_argument("--epochs", type=int, default=EPOCHS, help="Number of epochs to train the model")
-    parser.add_argument("--seq-len", type=int, default=SEQ_LEN, help="Sequence length of the input")
-    parser.add_argument("--d-model", type=int, default=D_MODEL, help="Dimensionality of the model")
-    parser.add_argument("--n-blocks", type=int, default=N_BLOCKS, help="Number of decoder blocks")
-    parser.add_argument("--heads", type=int, default=HEADS, help="Number of attention heads")
-    parser.add_argument("--vocab-size", type=int, default=VOCAB_SIZE, help="Vocabulary size to use")
-    parser.add_argument("--dropout", type=float, default=DROPOUT, help="Dropout probability")
-    parser.add_argument("--dff", type=int, default=DFF, help="Dimensionality of the feed forward layer")
+    parser.add_argument("--training-data", type=str, default=DEFAULT_TRAINING_CONFIG.training_data, help="Path to the training dataset")
+    parser.add_argument("--validation-data", type=str, default=DEFAULT_TRAINING_CONFIG.validation_data, help="Path to the validation dataset")
+    parser.add_argument("--testing-data", type=str, default=DEFAULT_TRAINING_CONFIG.testing_data, help="Path to the testing dataset")
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_TRAINING_CONFIG.batch_size, help="Batch size used during training")
+    parser.add_argument("--init-lr", type=float, default=DEFAULT_TRAINING_CONFIG.init_lr, help="Initial learning rate")
+    parser.add_argument("--tb-log-dir", type=str, default=DEFAULT_TRAINING_CONFIG.tb_log_dir, help="Initial learning rate")
+    parser.add_argument("--epochs", type=int, default=DEFAULT_TRAINING_CONFIG.epochs, help="Number of epochs to train the model")
+    parser.add_argument("--seq-len", type=int, default=DEFAULT_MODEL_CONFIG.seq_len, help="Sequence length of the input")
+    parser.add_argument("--d-model", type=int, default=DEFAULT_MODEL_CONFIG.d_model, help="Dimensionality of the model")
+    parser.add_argument("--n-blocks", type=int, default=DEFAULT_MODEL_CONFIG.n_blocks, help="Number of decoder blocks")
+    parser.add_argument("--heads", type=int, default=DEFAULT_MODEL_CONFIG.heads, help="Number of attention heads")
+    parser.add_argument("--vocab-size", type=int, default=DEFAULT_MODEL_CONFIG.vocab_size, help="Vocabulary size to use")
+    parser.add_argument("--dropout", type=float, default=DEFAULT_MODEL_CONFIG.dropout, help="Dropout probability")
+    parser.add_argument("--dff", type=int, default=DEFAULT_MODEL_CONFIG.dff, help="Dimensionality of the feed forward layer")
     parser.add_argument("--dist-backend", type=str, default="nccl", help="Distributed backend")
     parser.add_argument("--preload-weights", type=str, default="", help="File path to load saved weights")
-    parser.add_argument("--validation-samples", type=int, default=VALIDATION_SAMPLES, help="Number of samples to use for a single validation run")
+    parser.add_argument("--validation-samples", type=int, default=DEFAULT_TRAINING_CONFIG.validation_samples, help="Number of samples to use for a single validation run")
 
     args = parser.parse_args()
 
@@ -254,38 +236,37 @@ if __name__ == "__main__":
 
     assert args.d_model % args.heads == 0, "d_model must be divisible by heads"
 
-    TOKENIZER_FILEPATH = f"{WORKING_DIR}/tokenizers/amharic-bpe-tokenizer-{args.vocab_size // 1000}k.model"
-    PRELOAD_WEIGHTS_FILEPATH = args.preload_weights
-    VALIDATION_SAMPLES = args.validation_samples
-    BATCH_SIZE = args.batch_size
-    VOCAB_SIZE = args.vocab_size
-    N_BLOCKS = args.n_blocks
-    SEQ_LEN = args.seq_len
-    INIT_LR = args.init_lr
-    D_MODEL = args.d_model
-    DROPOUT = args.dropout
-    EPOCHS = args.epochs
-    HEADS = args.heads
-    DFF = args.dff
+    training_config = TrainingConfig(**args.__dict__)
+    model_config = ModelConfig(**args.__dict__)
+
+    print(training_config)
+    print(model_config)
 
     os.makedirs(WEIGHTS_DIRECTORY, exist_ok=True)
-    train_dataset, val_dataset, test_dataset = get_dataset()
+    tokenizer = SentencePieceProcessor(max_len=model_config.seq_len)
+    tokenizer.LoadFromFile(
+        f"{WORKING_DIR}/tokenizers/amharic-bpe-tokenizer-{args.vocab_size // 1000}k.model"
+    )
+
+    train_dataset = TextDataset(training_config.training_data, tokenizer, model_config.seq_len)
+    val_dataset = TextDataset(training_config.validation_data, tokenizer, model_config.seq_len)
+    test_dataset = TextDataset(training_config.testing_data, tokenizer, model_config.seq_len)
 
     state, weights = {}, {}
-    if PRELOAD_WEIGHTS_FILEPATH:
-        if not os.path.exists(PRELOAD_WEIGHTS_FILEPATH):
-            raise FileNotFoundError(f"File {PRELOAD_WEIGHTS_FILEPATH} does not exist")
+    if args.preload_weights:
+        if not os.path.exists(args.preload_weights):
+            raise FileNotFoundError(f"File {args.preload_weights} does not exist")
         
-        LOGGER.info(f"Preloading model weights {PRELOAD_WEIGHTS_FILEPATH}...")
-        state: dict = torch.load(PRELOAD_WEIGHTS_FILEPATH, map_location=DEVICE)
+        LOGGER.info(f"Preloading model weights {args.preload_weights}...")
+        state: dict = torch.load(args.preload_weights, map_location=DEVICE)
         weights = state["model_state_dict"]
         state.pop("model_state_dict")
     
-    model = GPTmodel.build(weights).to(DEVICE)
+    model = GPTmodel.build(model_config, weights).to(DEVICE)
 
-    train(model, train_dataset, val_dataset, args.is_distributed, state)
+    train(training_config, model, train_dataset, val_dataset, args.is_distributed, state)
 
-    test(model, test_dataset, args.is_distributed)
+    test(training_config, model, test_dataset, args.is_distributed)
 
     if args.is_distributed:
         dist.destroy_process_group()

@@ -1,33 +1,35 @@
-import torch, math
-import torch.nn as nn
+import math
+import torch
 from config import *
+import torch.nn as nn
 
 
 class Embedding(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, d_model: int, vocab_size: int, dropout: float) -> None:
         super().__init__()
-        self.embedding = nn.Embedding(VOCAB_SIZE, D_MODEL)
-        self.dropout = nn.Dropout(DROPOUT)
+        self.d_model = d_model
+        self.embedding = nn.Embedding(vocab_size, d_model)
+        self.dropout = nn.Dropout(dropout)
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.dropout(self.embedding(x) * math.sqrt(D_MODEL))
+        return self.dropout(self.embedding(x) * math.sqrt(self.d_model))
 
 
 class PositionEncoder(nn.Module):
-    def __init__(self):
+    def __init__(self, seq_len: int, d_model: int, dropout: float):
         super().__init__()
-        self.dropout = nn.Dropout(DROPOUT)
+        self.dropout = nn.Dropout(dropout)
         
         # (SEQ_LEN, 1)
-        pos = torch.arange(0, SEQ_LEN, dtype=torch.float).unsqueeze(1)
+        pos = torch.arange(0, seq_len, dtype=torch.float).unsqueeze(1)
 
         # (D_MODEL//2,)
-        div_term = torch.exp(torch.arange(0, D_MODEL, 2, dtype=torch.float) * -math.log(10000.0) / D_MODEL)
+        div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * -math.log(10000.0) / d_model)
 
         # (SEQ_LEN, D_MODEL)
-        self.pe: torch.Tensor = torch.zeros(SEQ_LEN, D_MODEL)
+        self.pe: torch.Tensor = torch.zeros(seq_len, d_model)
 
         # PE(pos, 2i) = sin(pos / (10000 ^ (2i/dmodel)))
         # PE(pos, 2i) = sin(pos * exp(-2i * log(10000) / dmodel))
@@ -49,18 +51,19 @@ class PositionEncoder(nn.Module):
 
 
 class MultiHeadAttentionBlock(nn.Module):
-    def __init__(self):
-        assert D_MODEL % HEADS == 0, "D_MODEL is not divisible by heads"
+    def __init__(self, d_model: int, dropout: float, heads: int):
+        assert d_model % heads == 0, "D_MODEL is not divisible by heads"
 
         super().__init__()
-        self.d_head: int = D_MODEL // HEADS
+        self.heads = heads
+        self.d_head: int = d_model // heads
 
-        self.Wq: nn.Linear = nn.Linear(D_MODEL, D_MODEL, bias=False)
-        self.Wk: nn.Linear = nn.Linear(D_MODEL, D_MODEL, bias=False)
-        self.Wv: nn.Linear = nn.Linear(D_MODEL, D_MODEL, bias=False)
-        self.Wo: nn.Linear = nn.Linear(D_MODEL, D_MODEL, bias=False)
+        self.Wq: nn.Linear = nn.Linear(d_model, d_model, bias=False)
+        self.Wk: nn.Linear = nn.Linear(d_model, d_model, bias=False)
+        self.Wv: nn.Linear = nn.Linear(d_model, d_model, bias=False)
+        self.Wo: nn.Linear = nn.Linear(d_model, d_model, bias=False)
 
-        self.dropout = nn.Dropout(DROPOUT)
+        self.dropout = nn.Dropout(dropout)
     
     # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
@@ -71,9 +74,9 @@ class MultiHeadAttentionBlock(nn.Module):
         value: torch.Tensor = self.Wv(x)
 
         # (N_BATCHES, SEQ_LEN, D_MODEL) --> (N_BATCHES, SEQ_LEN, HEADS, d_head) --> (N_BATCHES, HEADS, SEQ_LEN, d_head)
-        query = query.view(x.shape[0], x.shape[1], HEADS, -1).transpose(1, 2)
-        key = key.view(x.shape[0], x.shape[1], HEADS, -1).transpose(1, 2)
-        value = value.view(x.shape[0], x.shape[1], HEADS, -1).transpose(1, 2)
+        query = query.view(x.shape[0], x.shape[1], self.heads, -1).transpose(1, 2)
+        key = key.view(x.shape[0], x.shape[1], self.heads, -1).transpose(1, 2)
+        value = value.view(x.shape[0], x.shape[1], self.heads, -1).transpose(1, 2)
 
         # (N_BATCHES, HEADS, SEQ_LEN, d_head) @ (N_BATCHES, HEADS, d_head, SEQ_LEN)
         # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
@@ -103,11 +106,11 @@ class MultiHeadAttentionBlock(nn.Module):
     
 
 class FeedForwardBlock(nn.Module):
-    def __init__(self):
+    def __init__(self, d_model: int, dff: int, dropout: float):
         super().__init__()
-        self.linear1 = nn.Linear(D_MODEL, DFF)
-        self.linear2 = nn.Linear(DFF, D_MODEL)
-        self.dropout = nn.Dropout(DROPOUT)
+        self.linear1 = nn.Linear(d_model, dff)
+        self.linear2 = nn.Linear(dff, d_model)
+        self.dropout = nn.Dropout(dropout)
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL)
     # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
@@ -120,10 +123,10 @@ class FeedForwardBlock(nn.Module):
         
 
 class ResidualConnection(nn.Module):
-    def __init__(self):
+    def __init__(self, d_model: int, dropout: float):
         super().__init__()
-        self.layer_norm = nn.LayerNorm(D_MODEL)
-        self.dropout = nn.Dropout(DROPOUT)
+        self.layer_norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL)
     # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
@@ -132,11 +135,11 @@ class ResidualConnection(nn.Module):
         
 
 class DecoderBlock(nn.Module):
-    def __init__(self):
+    def __init__(self, d_model: int, dff: int, dropout: float, heads: int):
         super().__init__()
-        self.attention_head = MultiHeadAttentionBlock()
-        self.feed_forward = FeedForwardBlock()
-        self.residual_connections = nn.ModuleList([ResidualConnection() for _ in range(2)])
+        self.attention_head = MultiHeadAttentionBlock(d_model, dropout, heads)
+        self.feed_forward = FeedForwardBlock(d_model, dff, dropout)
+        self.residual_connections = nn.ModuleList([ResidualConnection(d_model, dropout) for _ in range(2)])
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
@@ -147,9 +150,9 @@ class DecoderBlock(nn.Module):
 
 
 class Projection(nn.Module):
-    def __init__(self):
+    def __init__(self, d_model: int, vocab_size: int):
         super().__init__()
-        self.linear = nn.Linear(D_MODEL, VOCAB_SIZE)
+        self.linear = nn.Linear(d_model, vocab_size)
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL)
     # Output shape: (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
@@ -158,13 +161,23 @@ class Projection(nn.Module):
 
 
 class GPTmodel(nn.Module):
-    def __init__(self):
+    def __init__(self, n_blocks: int, d_model: int, vocab_size: int, dff: int, dropout: float, heads: int, seq_len: int):
         super().__init__()
-        self.decoders = nn.ModuleList([DecoderBlock() for _ in range(N_BLOCKS)])
-        self.embedding = Embedding()
-        self.position_encoder = PositionEncoder()
-        self.projection = Projection()
-        self.layer_norm = nn.LayerNorm(D_MODEL)
+        self.config = ModelConfig(
+            vocab_size=vocab_size,
+            n_blocks=n_blocks,
+            d_model=d_model,
+            dropout=dropout,
+            seq_len=seq_len,
+            heads=heads,
+            dff=dff,
+        )
+
+        self.decoders = nn.ModuleList([DecoderBlock(d_model, dff, dropout, heads) for _ in range(n_blocks)])
+        self.embedding = Embedding(d_model, vocab_size, dropout)
+        self.position_encoder = PositionEncoder(seq_len, d_model, dropout)
+        self.projection = Projection(d_model, vocab_size)
+        self.layer_norm = nn.LayerNorm(d_model)
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
@@ -193,9 +206,18 @@ class GPTmodel(nn.Module):
     
     @staticmethod
     def build(
+        params: ModelConfig,
         state: dict = {}
     ):
-        model = GPTmodel()
+        model = GPTmodel(
+            n_blocks=params.n_blocks,
+            d_model=params.d_model,
+            vocab_size=params.vocab_size,
+            dff=params.dff,
+            dropout=params.dropout,
+            heads=params.heads,
+            seq_len=params.seq_len
+        )
 
         if state:
             model.load_state_dict(state)

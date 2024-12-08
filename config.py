@@ -1,6 +1,5 @@
-import logging
+import os, logging
 import torch, random, numpy
-
 
 torch.manual_seed(3000)
 if torch.cuda.is_available():
@@ -14,26 +13,47 @@ numpy.random.seed(3000)
 LOGGER = logging.getLogger(str(DEVICE).upper())
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")
 
-WORKING_DIR = "/workspace/text-generation"
 GLOBAL_RANK = 0
 LOCAL_RANK = 0
-VOCAB_SIZE = 32000
-BATCH_SIZE = 64
-EPOCHS = 100
-INIT_LR = 2e-04
-SEQ_LEN = 50
-VALIDATION_SAMPLES=20
-D_MODEL = 768
-N_BLOCKS = 6
-HEADS = 16
-DROPOUT = 0.1
-DFF = 3072
-GLOBAL_RANK = 0
 MASTER_RANK = 0
-WEIGHTS_DIRECTORY = f"{WORKING_DIR}/weights"
-PRELOAD_WEIGHTS_FILEPATH = ""
-TB_LOG_DIR = f"{WORKING_DIR}/logs"
-TEST_DATA_FILEPATH=f"{WORKING_DIR}/data/test_chunk_size_256.json"
-TRAINING_DATA_FILEPATH=f"{WORKING_DIR}/data/train_chunk_size_256.json"
-VALIDATION_DATA_FILEPATH=f"{WORKING_DIR}/data/validate_chunk_size_256.json"
-TOKENIZER_FILEPATH = f"{WORKING_DIR}/tokenizers/amharic-bpe-tokenizer-{VOCAB_SIZE // 1000}k.model"
+WORKING_DIR = os.path.dirname(os.path.realpath(__file__))
+WEIGHTS_DIRECTORY = os.path.join(WORKING_DIR, "weights")
+
+class Config:
+    def to_dict(self):
+        return {key: value for key, value in self.__dict__.items()}
+
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    def __setitem__(self, key, value):
+        setattr(self, key, value)
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}({self.__dict__})"
+
+
+class ModelConfig(Config):
+    def __init__(self, **kwargs):
+        self.d_model: int = kwargs.get("d_model", 512)
+        self.n_blocks: int = kwargs.get("n_blocks", 6)
+        self.vocab_size: int = kwargs.get("vocab_size", 50)
+        self.dff: int = kwargs.get("dff", 2048)
+        self.heads: int = kwargs.get("heads", 8)
+        self.dropout: float = kwargs.get("dropout", 0.1)
+        self.seq_len: int = kwargs.get("seq_len", 50)
+
+
+class TrainingConfig(Config):
+    def __init__(self, **kwargs):
+        self.epochs: int = kwargs.get("epochs", 10)
+        self.batch_size: int = kwargs.get("batch_size", 64)
+        self.init_lr: float = kwargs.get("init_lr", 2e-04)
+        self.tb_log_dir: str = kwargs.get("tb_log_dir", "logs")
+        self.validation_samples: int = kwargs.get("validation_samples", 20)
+        self.training_data: str = kwargs.get("training_data", os.path.join(WORKING_DIR, "data", "train_chunk_size_256.json"))
+        self.validation_data: str = kwargs.get("training_data", os.path.join(WORKING_DIR, "data", "validate_chunk_size_256.json"))
+        self.testing_data: str = kwargs.get("training_data", os.path.join(WORKING_DIR, "data", "test_chunk_size_256.json"))
+
+DEFAULT_TRAINING_CONFIG = TrainingConfig()
+DEFAULT_MODEL_CONFIG = ModelConfig()
