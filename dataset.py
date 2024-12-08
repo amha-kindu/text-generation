@@ -8,11 +8,10 @@ from tokenizer import SentencePieceProcessor
 
 
 class TextDataset(Dataset):
-    def __init__(self, file_path: str, tokenizer: SentencePieceProcessor, seq_len: int) -> None:
+    def __init__(self, file_path: str, tokenizer: SentencePieceProcessor) -> None:
         super().__init__()
         self.file = open(file_path, 'r', encoding='utf-8')
         self.tokenizer = tokenizer
-        self.seq_len = seq_len
         self.preprocessor = AmharicPreprocessor(tokenizer)
 
         self.pad_token = torch.tensor([self.tokenizer.pad_id()], dtype=torch.int64)
@@ -44,8 +43,7 @@ class TextDataset(Dataset):
         
         # Preprocess and tokenize
         token_ids = self.preprocessor.preprocess(text)
-        token_ids = token_ids[:self.seq_len]
-        padding = self.seq_len - len(token_ids)
+        padding = self.tokenizer.max_len - len(token_ids)
 
         # (SEQ_LEN,)
         decoder_input = torch.concat([
@@ -66,14 +64,14 @@ class TextDataset(Dataset):
 
             # (padding,)
             torch.tensor([self.pad_token] * padding, dtype=torch.int64)
-        ])[:self.seq_len]
+        ])[:self.tokenizer.max_len]
 
         return {
             # (SEQ_LEN,)
             "decoder_input": decoder_input,
 
             # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
-            "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0).int() & self.lookback_mask(self.seq_len),
+            "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0).int() & self.lookback_mask(self.tokenizer.max_len),
 
             # (SEQ_LEN,)
             "label": label

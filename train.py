@@ -7,10 +7,10 @@ from tqdm import tqdm
 from model import GPTmodel
 from dataset import TextDataset
 import torch.distributed as dist
-from torch.utils.tensorboard import SummaryWriter
 from tokenizer import SentencePieceProcessor
-from torch.utils.data import DataLoader, RandomSampler
+from torch.utils.tensorboard import SummaryWriter
 from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 
 
@@ -239,18 +239,15 @@ if __name__ == "__main__":
     training_config = TrainingConfig(**args.__dict__)
     model_config = ModelConfig(**args.__dict__)
 
-    print(training_config)
-    print(model_config)
-
     os.makedirs(WEIGHTS_DIRECTORY, exist_ok=True)
     tokenizer = SentencePieceProcessor(max_len=model_config.seq_len)
     tokenizer.LoadFromFile(
         f"{WORKING_DIR}/tokenizers/amharic-bpe-tokenizer-{args.vocab_size // 1000}k.model"
     )
 
-    train_dataset = TextDataset(training_config.training_data, tokenizer, model_config.seq_len)
-    val_dataset = TextDataset(training_config.validation_data, tokenizer, model_config.seq_len)
-    test_dataset = TextDataset(training_config.testing_data, tokenizer, model_config.seq_len)
+    train_dataset = TextDataset(training_config.training_data, tokenizer)
+    val_dataset = TextDataset(training_config.validation_data, tokenizer)
+    test_dataset = TextDataset(training_config.testing_data, tokenizer)
 
     state, weights = {}, {}
     if args.preload_weights:
