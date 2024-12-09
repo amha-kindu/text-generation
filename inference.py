@@ -1,16 +1,14 @@
-import sys
 import torch
+import argparse
 from config import *
 from model import GPTmodel
-from PyQt5.QtGui import QFont
 from preprocessor import AmharicPreprocessor
 from tokenizer import SentencePieceProcessor
-from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout
 
 
 class GptInferenceEngine:
 
-    def __init__(self, model: GPTmodel, tokenizer: SentencePieceProcessor, top_k: int= 5, nucleus_threshold=10) -> None:
+    def __init__(self, model: GPTmodel, tokenizer: SentencePieceProcessor, top_k: int= 1, nucleus_threshold=10) -> None:
         self.model = model
         self.top_k = top_k
         self.tokenizer = tokenizer
@@ -30,7 +28,7 @@ class GptInferenceEngine:
         decoder_input = torch.concat([
             torch.tensor(token_ids, dtype=torch.int64),
             torch.tensor([self.pad_id] * padding, dtype=torch.int64)
-        ]).unsqueeze(0).to(LOCAL_RANK)
+        ]).unsqueeze(0).to(DEVICE)
 
         predicted_token = None
         non_pad_tokens = len(token_ids)
@@ -45,8 +43,11 @@ class GptInferenceEngine:
             # dimension using softmax - (1, VOCAB_SIZE)
             probab_distribution = torch.softmax(next_token_logits, dim=1)
 
-            # Greedily pick the token with the highest probability
-            _, predicted_token = torch.max(probab_distribution, dim=1)
+            # Get the top 5 tokens with the highest probabilities
+            _, top_k_tokens = torch.topk(probab_distribution, k=self.top_k, dim=1)
+
+            # Randomly pick from the top 5 most probable tokens
+            predicted_token = top_k_tokens[0, torch.randint(0, self.top_k, (1,)).item()]
 
             # Add the predicted token to the decoder input for the subsequent iterations
             decoder_input[:, non_pad_tokens] = predicted_token.item()
@@ -60,50 +61,6 @@ class GptInferenceEngine:
         return self.tokenizer.Decode(decoder_input.detach().cpu().tolist())
 
 
-class TranslationApp(QWidget):
-    def __init__(self, inference_engine: GptInferenceEngine):
-        super().__init__()
-        self.init_ui()
-        self.inference_engine = inference_engine
-
-    def init_ui(self):
-        self.setWindowTitle('Translation App')
-        self.setGeometry(100, 100, 600, 400)
-
-        self.input_label = QLabel('Input(English):')
-        self.input_label.setFont(QFont('Arial', 12))  
-        self.input_textbox = QLineEdit(self)
-        self.input_textbox.setFont(QFont('Nyala', 14))  
-        self.input_textbox
-        self.input_textbox.returnPressed.connect(self.on_translate_button_clicked)
-
-        self.output_label = QLabel('Output(Amharic):')
-        self.output_label.setFont(QFont('Arial', 12))  
-        self.output_textbox = QLineEdit(self)
-        self.output_textbox.setReadOnly(True)
-        self.output_textbox.setFont(QFont('Nyala', 14)) 
-
-        self.translate_button = QPushButton('Translate', self)
-        self.translate_button.setFont(QFont('Arial', 12))
-        self.translate_button.setFixedWidth(self.width() // 2)
-        self.translate_button.clicked.connect(self.on_translate_button_clicked)
-
-        layout = QGridLayout()
-        layout.addWidget(self.input_label, 0, 0)
-        layout.addWidget(self.input_textbox, 0, 1)
-        layout.addWidget(self.output_label, 1, 0)
-        layout.addWidget(self.output_textbox, 1, 1)
-        layout.addWidget(self.translate_button, 2, 1, 1, 2)
-
-        self.setLayout(layout)
-
-    def on_translate_button_clicked(self):
-        input_text = self.input_textbox.text()
-        prediction: str = self.inference_engine.translate(input_text, 10)
-        self.output_textbox.setText(prediction)
-
-import argparse
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train a GPT model")
     parser.add_argument("--preload-weights", type=str, required=True, help="File path to load saved weights")
@@ -116,9 +73,8 @@ if __name__ == '__main__':
     LOGGER.info(f"Preloading model weights {args.preload_weights}...")
     checkpoint: dict = torch.load(args.preload_weights, map_location=DEVICE)
 
-    model_config = ModelConfig(checkpoint["model_config"])
+    model_config: ModelConfig = checkpoint["model_config"]
 
-    app = QApplication(sys.argv)
     model = GPTmodel.build(model_config, checkpoint["model_state_dict"]).to(DEVICE)
 
     model.eval()
@@ -128,11 +84,13 @@ if __name__ == '__main__':
     LOGGER.info(f"Trainable Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     LOGGER.info(f"Model Size(MB): {total_params * 4 / (1024 ** 2):.2f}MB")
     
-    tokenizer = SentencePieceProcessor.LoadFromFile(
+    tokenizer = SentencePieceProcessor(model_config.seq_len)
+    tokenizer.LoadFromFile(
         f"{WORKING_DIR}/tokenizers/amharic-bpe-tokenizer-{model_config.vocab_size // 1000}k.model"
     )
     inference_engine = GptInferenceEngine(model, tokenizer)
 
-    translation_app = TranslationApp(inference_engine)
-    translation_app.show()
-    sys.exit(app.exec_())
+    user_input = input("Enter amharic text to complete: ")
+    LOGGER.info(
+        inference_engine.complete(user_input, model_config.seq_len)
+    )

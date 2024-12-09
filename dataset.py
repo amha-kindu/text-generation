@@ -3,8 +3,8 @@ import torch
 from config import *
 from typing import Iterator
 from preprocessor import AmharicPreprocessor
-from torch.utils.data import Dataset, DataLoader, Sampler
 from tokenizer import SentencePieceProcessor
+from torch.utils.data import Dataset, DataLoader, Sampler
 
 
 class TextDataset(Dataset):
@@ -51,7 +51,7 @@ class TextDataset(Dataset):
             torch.tensor(token_ids, dtype=torch.int64),
 
             # (padding,)
-            torch.tensor([self.pad_token] * padding, dtype=torch.int64)
+            torch.tensor([self.pad_token.item()] * padding, dtype=torch.int64)
         ])
 
         # (SEQ_LEN,)
@@ -59,12 +59,9 @@ class TextDataset(Dataset):
             # (len(token_ids) - 1,)
             torch.tensor(token_ids[1:], dtype=torch.int64),
 
-            # (1, )
-            torch.tensor([self.eos_token], dtype=torch.int64),
-
             # (padding,)
-            torch.tensor([self.pad_token] * padding, dtype=torch.int64)
-        ])[:self.tokenizer.max_len]
+            torch.tensor([self.pad_token.item()] * (padding + 1), dtype=torch.int64)
+        ])[:decoder_input.size(0)]
 
         return {
             # (SEQ_LEN,)
