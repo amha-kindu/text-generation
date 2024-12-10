@@ -5,16 +5,15 @@ import torch.nn as nn
 
 
 class Embedding(nn.Module):
-    def __init__(self, d_model: int, vocab_size: int, dropout: float) -> None:
+    def __init__(self, d_model: int, vocab_size: int) -> None:
         super().__init__()
         self.d_model = d_model
         self.embedding = nn.Embedding(vocab_size, d_model)
-        self.dropout = nn.Dropout(dropout)
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.dropout(self.embedding(x) * math.sqrt(self.d_model))
+        return self.embedding(x) * math.sqrt(self.d_model)
 
 
 class PositionEncoder(nn.Module):
@@ -174,7 +173,7 @@ class GPTmodel(nn.Module):
         )
 
         self.decoders = nn.ModuleList([DecoderBlock(d_model, dff, dropout, heads) for _ in range(n_blocks)])
-        self.embedding = Embedding(d_model, vocab_size, dropout)
+        self.embedding = Embedding(d_model, vocab_size)
         self.position_encoder = PositionEncoder(seq_len, d_model, dropout)
         self.projection = Projection(d_model, vocab_size)
         self.layer_norm = nn.LayerNorm(d_model)

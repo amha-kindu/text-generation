@@ -35,14 +35,13 @@ class SentenceIterator(Iterator):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Train a GPT model")
-    parser.add_argument("--tokenizer-name", type=str, required=True, help="Name of the tokenizer to use")
     parser.add_argument("--training-data", type=str, default=DEFAULT_TRAINING_CONFIG.training_data, help="Path to the training dataset")
     parser.add_argument("--validation-data", type=str, default=DEFAULT_TRAINING_CONFIG.validation_data, help="Path to the validation dataset")
     parser.add_argument("--testing-data", type=str, default=DEFAULT_TRAINING_CONFIG.testing_data, help="Path to the testing dataset")
     parser.add_argument("--vocab-size", type=int, default=DEFAULT_MODEL_CONFIG.vocab_size, help="Vocabulary size to use")
 
     args = parser.parse_args()
-    config = TrainingConfig(args)
+    config = TrainingConfig(**args.__dict__)
 
     iterator = SentenceIterator([
         config.training_data, config.testing_data, config.validation_data
