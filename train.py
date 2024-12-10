@@ -39,14 +39,14 @@ def test(config: TrainingConfig, model: GPTmodel, test_dataset: TextDataset, is_
             # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
             logits: torch.Tensor = model(decoder_input, decoder_mask)
 
-        # Compute the training loss
-        test_loss: torch.Tensor = loss_func(
-            # (N_BATCHES, SEQ_LEN, VOCAB_SIZE) --> (N_BATCHES * SEQ_LEN, VOCAB_SIZE)
-            logits.view(-1, model.config.vocab_size),
+            # Compute the training loss
+            test_loss: torch.Tensor = loss_func(
+                # (N_BATCHES, SEQ_LEN, VOCAB_SIZE) --> (N_BATCHES * SEQ_LEN, VOCAB_SIZE)
+                logits.view(-1, model.config.vocab_size),
 
-            # (N_BATCHES, SEQ_LEN) --> (N_BATCHES * SEQ_LEN, )
-            label.view(-1)
-        )
+                # (N_BATCHES, SEQ_LEN) --> (N_BATCHES * SEQ_LEN, )
+                label.view(-1)
+            )
 
         batch_iterator.set_postfix({"avg test_loss": f"{test_loss.item() / (index + 1):6.3f}"})
 
@@ -72,14 +72,14 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func: nn.Cros
             # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
             logits: torch.Tensor = model(decoder_input, decoder_mask)
 
-        # Compute the cross-entropy loss
-        loss: torch.Tensor = loss_func(
-            # (N_BATCHES, SEQ_LEN, VOCAB_SIZE) --> (N_BATCHES * SEQ_LEN, VOCAB_SIZE)
-            logits.view(-1, model.config.vocab_size),
+            # Compute the cross-entropy loss
+            loss: torch.Tensor = loss_func(
+                # (N_BATCHES, SEQ_LEN, VOCAB_SIZE) --> (N_BATCHES * SEQ_LEN, VOCAB_SIZE)
+                logits.view(-1, model.config.vocab_size),
 
-            # (N_BATCHES, SEQ_LEN) --> (N_BATCHES * SEQ_LEN, )
-            label.view(-1)
-        ) 
+                # (N_BATCHES, SEQ_LEN) --> (N_BATCHES * SEQ_LEN, )
+                label.view(-1)
+            ) 
         val_loss += loss.item()
 
     return val_loss / len(val_batch_iterator)
