@@ -1,14 +1,15 @@
 import os, logging
 import torch, random, numpy
 
+random.seed(3000)
 torch.manual_seed(3000)
+numpy.random.seed(3000)
 if torch.cuda.is_available():
     DEVICE = torch.device('cuda')
     torch.cuda.manual_seed_all(3000)
 else:
     DEVICE = torch.device('cpu')
-random.seed(3000)
-numpy.random.seed(3000)
+MIXED_PRECISION_ENABLED = torch.cuda.is_available() and torch.amp.autocast_mode.is_autocast_available(DEVICE.type)
 
 LOGGER = logging.getLogger(str(DEVICE).upper())
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")

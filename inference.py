@@ -33,8 +33,9 @@ class GptInferenceEngine:
         predicted_token = None
         non_pad_tokens = len(token_ids)
         while non_pad_tokens > 0 and non_pad_tokens < max_len and predicted_token != self.eos_id:
-            # (1, SEQ_LEN, VOCAB_SIZE)
-            logits = self.model(decoder_input)
+            with torch.autocast(device_type=DEVICE.type, enabled=MIXED_PRECISION_ENABLED):
+                # (1, SEQ_LEN, VOCAB_SIZE)
+                logits = self.model(decoder_input)
 
             # (1, VOCAB_SIZE)
             next_token_logits = logits[:, non_pad_tokens - 1]
@@ -83,6 +84,7 @@ if __name__ == '__main__':
     LOGGER.info(f"Total Parameters: {total_params}")
     LOGGER.info(f"Trainable Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     LOGGER.info(f"Model Size(MB): {total_params * 4 / (1024 ** 2):.2f}MB")
+    LOGGER.info("Using Mixed Precision (FP16 and FP32) Training" if MIXED_PRECISION_ENABLED else "Using Single Precision (FP32) Training")
     
     tokenizer = SentencePieceProcessor(model_config.seq_len)
     tokenizer.LoadFromFile(

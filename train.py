@@ -35,8 +35,9 @@ def test(config: TrainingConfig, model: GPTmodel, test_dataset: TextDataset, is_
         # (N_BATCHES, SEQ_LEN)
         label: torch.Tensor = batch['label'].to(DEVICE)
 
-        # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
-        logits: torch.Tensor = model(decoder_input, decoder_mask)
+        with torch.autocast(DEVICE.type, enabled=MIXED_PRECISION_ENABLED):
+            # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
+            logits: torch.Tensor = model(decoder_input, decoder_mask)
 
         # Compute the training loss
         test_loss: torch.Tensor = loss_func(
@@ -67,8 +68,9 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func: nn.Cros
         # (N_BATCHES, SEQ_LEN)
         label: torch.Tensor = batch['label'].to(DEVICE)
 
-        # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
-        logits: torch.Tensor = model(decoder_input, decoder_mask)
+        with torch.autocast(DEVICE.type, enabled=MIXED_PRECISION_ENABLED):
+            # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
+            logits: torch.Tensor = model(decoder_input, decoder_mask)
 
         # Compute the cross-entropy loss
         loss: torch.Tensor = loss_func(
@@ -89,6 +91,8 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
 
     if is_distributed:
         model = DistributedDataParallel(model, device_ids=[LOCAL_RANK])
+    
+    scaler = torch.GradScaler(device=DEVICE.type) if MIXED_PRECISION_ENABLED else None
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.init_lr, weight_decay=1e-2)
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -129,17 +133,19 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
             # (N_BATCHES, SEQ_LEN)
             label: torch.Tensor = batch['label'].to(DEVICE)
 
-            # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
-            logits: torch.Tensor = model(decoder_input, decoder_mask)
+            with torch.autocast(device_type=DEVICE.type, enabled=MIXED_PRECISION_ENABLED):
+                # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
+                logits: torch.Tensor = model(decoder_input, decoder_mask)
 
-            # Compute the cross-entropy loss
-            batch_loss = loss_func.forward(
-                # (N_BATCHES, SEQ_LEN, VOCAB_SIZE) --> (N_BATCHES * SEQ_LEN, VOCAB_SIZE)
-                logits.view(-1, train_dataset.tokenizer.vocab_size()),
+                # Compute the cross-entropy loss
+                batch_loss = loss_func.forward(
+                    # (N_BATCHES, SEQ_LEN, VOCAB_SIZE) --> (N_BATCHES * SEQ_LEN, VOCAB_SIZE)
+                    logits.view(-1, train_dataset.tokenizer.vocab_size()),
 
-                # (N_BATCHES, SEQ_LEN) --> (N_BATCHES * SEQ_LEN, )
-                label.view(-1)
-            )
+                    # (N_BATCHES, SEQ_LEN) --> (N_BATCHES * SEQ_LEN, )
+                    label.view(-1)
+                )
+            
             training_loss += batch_loss.item()
 
             if IS_MASTER:
@@ -167,12 +173,19 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
                 "val_loss": validation_loss / ((global_step + 1) // 200 + 1)
             })
 
+            # Scale the loss for numerical stability if using mixed-precision and
             # Perform the backward pass on the computation graph built during the forward pass, 
             # in order to calculate the grad for each of the intermediate and leaf tensors on the computation graph
-            batch_loss.backward()
-            
-            # Update the model parameters
-            optimizer.step()
+            if MIXED_PRECISION_ENABLED:
+                scaler.scale(batch_loss).backward()
+
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                batch_loss.backward()
+                
+                optimizer.step()
+
             
             # Zero the gradients of the model parameters to prevent gradient accumulation 
             optimizer.zero_grad()
@@ -240,7 +253,7 @@ if __name__ == "__main__":
     os.makedirs(WEIGHTS_DIRECTORY, exist_ok=True)
     tokenizer = SentencePieceProcessor(max_len=model_config.seq_len)
     tokenizer.LoadFromFile(
-        f"{WORKING_DIR}/tokenizers/amharic-bpe-tokenizer-{args.vocab_size // 1000}k.model"
+        os.path.join(WORKING_DIR, os.path.join("tokenizers", f"amharic-bpe-tokenizer-{model_config.vocab_size // 1000}k.model"))
     )
 
     train_dataset = TextDataset(training_config.training_data, tokenizer)
@@ -256,6 +269,8 @@ if __name__ == "__main__":
         state: dict = torch.load(args.preload_weights, map_location=DEVICE)
         weights = state["model_state_dict"]
         state.pop("model_state_dict")
+
+    LOGGER.info("Using Mixed Precision (FP16 and FP32) Training" if MIXED_PRECISION_ENABLED else "Using Single Precision (FP32) Training")
     
     model = GPTmodel.build(model_config, weights).to(DEVICE)
 
