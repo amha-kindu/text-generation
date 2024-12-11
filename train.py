@@ -110,7 +110,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
 
     loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(DEVICE)
 
-    sampler = DistributedSampler(train_dataset, shuffle=True) if is_distributed else None
+    sampler = DistributedSampler(train_dataset, num_replicas=dist.get_world_size(), rank=LOCAL_RANK, shuffle=True) if is_distributed else None
     batch_iterator = train_dataset.batch_iterator(config.batch_size, sampler=sampler)
 
     val_sampler = RandomSampler(val_dataset, replacement=True, num_samples=config.validation_samples)
