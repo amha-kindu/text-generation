@@ -21,7 +21,7 @@ class SentenceIterator(Iterator):
         with open(self.file_paths[self.current_file], 'r', encoding='utf-8') as f:
             sentences = json.loads(f.read())
             for sentence in sentences:
-                yield self.preprocessor.preprocess(sentence, encode=False)
+                yield sentence
             self.current_file += 1
         yield None
 
@@ -36,16 +36,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Train a GPT model")
     parser.add_argument("--training-data", type=str, default=DEFAULT_TRAINING_CONFIG.training_data, help="Path to the training dataset")
-    parser.add_argument("--validation-data", type=str, default=DEFAULT_TRAINING_CONFIG.validation_data, help="Path to the validation dataset")
-    parser.add_argument("--testing-data", type=str, default=DEFAULT_TRAINING_CONFIG.testing_data, help="Path to the testing dataset")
     parser.add_argument("--vocab-size", type=int, default=DEFAULT_MODEL_CONFIG.vocab_size, help="Vocabulary size to use")
 
     args = parser.parse_args()
     config = TrainingConfig(**args.__dict__)
 
-    iterator = SentenceIterator([
-        config.training_data, config.testing_data, config.validation_data
-    ])
+    iterator = SentenceIterator([config.training_data])
 
     spm.SentencePieceTrainer.Train(
         sentence_iterator=iterator,
