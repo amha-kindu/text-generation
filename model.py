@@ -88,7 +88,8 @@ class MultiHeadAttentionBlock(nn.Module):
                 attention_scores.masked_fill_(mask == False, -1e09)
 
             # Cast back to FP16 for subsequent operations
-            attention_scores = attention_scores.to(torch.float16)
+            if MIXED_PRECISION_ENABLED:
+                attention_scores = attention_scores.to(torch.float16)
 
         # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
         attention_scores = torch.softmax(
