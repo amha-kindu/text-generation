@@ -4,18 +4,17 @@ from tokenizer import SentencePieceProcessor
 
 
 class PreprocessingPipeline(ABC):   
-    def __init__(self, tokenizer: SentencePieceProcessor) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.tokenizer = tokenizer
     
     @abstractmethod
-    def preprocess(self, text: str, encode=True) -> str:
+    def execute(self, text: str) -> str:
         pass
 
     
 class AmharicPreprocessor(PreprocessingPipeline):
-    def __init__(self, tokenizer: SentencePieceProcessor) -> None:
-        super().__init__(tokenizer)
+    def __init__(self) -> None:
+        super().__init__()
         self.extra_whitespace = re.compile(r'\s{2,}')
         self.normalization_patterns = [
             (re.compile('[ሃኅኃሐሓኻ]'), 'ሀ'),
@@ -68,23 +67,18 @@ class AmharicPreprocessor(PreprocessingPipeline):
             (re.compile('[ኵ]'), 'ኩ')
         ]
     
-    def preprocess(self, text: str, encode=True) -> str:
+    def execute(self, text: str) -> str:
         # Remove leading and trailing spaces
         text = text.strip()
 
         # Character level mismatch
         text = self.normalize_char_level_missmatch(text)
 
-        # Remove extra whitespace
-        text = self.extra_whitespace.sub(' ', text)
-        
-        if encode:
-            return self.tokenizer.Encode(
-                text,
-                out_type=int
-            )
-        else:
-            return text
+        # Remove non-amharic character except roman numbers
+        text = re.sub(r'[^\u1200-\u137F0-9]', '', text)
+
+        # Remove extra whitespace and return
+        return self.extra_whitespace.sub(' ', text)
 
     def normalize_char_level_missmatch(self, text: str) -> str:
         for pattern, replacement in self.normalization_patterns:

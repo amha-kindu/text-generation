@@ -1,4 +1,4 @@
-import json
+import ijson
 import torch
 from config import *
 from typing import Iterator
@@ -12,13 +12,21 @@ class TextDataset(Dataset):
         super().__init__()
         self.file = open(file_path, 'r', encoding='utf-8')
         self.tokenizer = tokenizer
-        self.preprocessor = AmharicPreprocessor(tokenizer)
 
         self.pad_token = torch.tensor([self.tokenizer.pad_id()], dtype=torch.int64)
         self.eos_token = torch.tensor([self.tokenizer.eos_id()], dtype=torch.int64)
 
+        self.sentences = []
+        preprocessor = AmharicPreprocessor()
         with open(file_path, 'r', encoding='utf-8') as f:
-            self.sentences = json.loads(f.read())
+            LOGGER.info(f"\033[93mLoading data from {file_path}...\033[0m")
+            for sentence in ijson.items(f, "item"):
+                preprocessed_sentence = preprocessor.execute(sentence)
+                if preprocessed_sentence:
+                    self.sentences.append(preprocessed_sentence)
+                    if self.sentences and len(self.sentences) % 100000 == 0:
+                        LOGGER.info(f"\033[93mLoaded {len(self.sentences)} from {file_path}\033[0m")
+        LOGGER.info(f"\033[92mDone! Loaded {len(self.sentences)} sentences from {file_path}\033[0m")
 
     def __len__(self) -> int:
         return len(self.sentences)
@@ -42,7 +50,7 @@ class TextDataset(Dataset):
         text = self.sentences[index]
         
         # Preprocess and tokenize
-        token_ids = self.preprocessor.preprocess(text)
+        token_ids = self.tokenizer.Encode(text, out_type=int)
         padding = self.tokenizer.max_len - len(token_ids) + 1
 
         # (SEQ_LEN,)
@@ -52,7 +60,7 @@ class TextDataset(Dataset):
 
             # (padding,)
             torch.tensor([self.pad_token.item()] * padding, dtype=torch.int64)
-        ])
+        ])[:self.tokenizer.max_len]
 
         # (SEQ_LEN,)
         label = torch.concat([

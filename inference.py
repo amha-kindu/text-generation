@@ -21,7 +21,8 @@ class GptInferenceEngine:
 
     @torch.no_grad()
     def complete(self, text: str, max_len: int) -> str:
-        token_ids = self.preprocessor.preprocess(text)
+        text = self.preprocessor.execute(text)
+        token_ids = self.tokenizer.Encode(text, out_type=int)
         padding = model.config.seq_len - len(token_ids)
 
         # (1, SEQ_LEN)

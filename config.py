@@ -12,7 +12,7 @@ else:
 MIXED_PRECISION_ENABLED = torch.cuda.is_available() and torch.amp.autocast_mode.is_autocast_available(DEVICE.type)
 
 LOGGER = logging.getLogger(str(DEVICE).upper())
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")
+logging.basicConfig(level=logging.INFO, format="\033[95m%(asctime)s - %(levelname)s - %(name)s - %(message)s\033[0m")
 
 GLOBAL_RANK = 0
 LOCAL_RANK = 0
