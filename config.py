@@ -21,7 +21,7 @@ if torch.cuda.is_available():
     torch.cuda.set_device(DEVICE)
     MIXED_PRECISION_ENABLED = torch.amp.autocast_mode.is_autocast_available(DEVICE.type)
 
-logging.basicConfig(level=logging.INFO, format="\033[95m%(asctime)s - %(levelname)s - %(name)s - %(message)s\033[0m")
+logging.basicConfig(level=logging.INFO, format="\033[95m%(asctime)s\033[0m - \033[94m%(levelname)s\033[0m - \033[96m%(name)s\033[0m - \033[93m%(message)s\033[0m")
 
 class Config:
     def to_dict(self):

@@ -15,7 +15,7 @@ class GptInferenceEngine:
         self.nucleus_threshold = nucleus_threshold
         self.pad_id = self.tokenizer.pad_id()
         self.eos_id = self.tokenizer.eos_id()
-        self.preprocessor = AmharicPreprocessor(tokenizer)
+        self.preprocessor = AmharicPreprocessor()
 
         self.model.eval()
 

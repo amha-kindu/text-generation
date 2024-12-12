@@ -1,5 +1,5 @@
 import os
-import json
+import ijson
 import argparse
 from config import *
 import sentencepiece as spm
@@ -11,7 +11,7 @@ class SentenceIterator(Iterator):
     def __init__(self, file_paths: list[str]):
         self.current_file = 0
         self.file_paths = file_paths
-        self.preprocessor = AmharicPreprocessor(None)
+        self.preprocessor = AmharicPreprocessor()
         self.generator = self.__gen__()
 
     def __iter__(self) -> Iterator:
@@ -19,9 +19,10 @@ class SentenceIterator(Iterator):
     
     def __gen__(self) -> Generator:
         with open(self.file_paths[self.current_file], 'r', encoding='utf-8') as f:
-            sentences = json.loads(f.read())
-            for sentence in sentences:
-                yield sentence
+            for sentence in ijson.items(f, "item"):
+                preprocessed_sentence = self.preprocessor.execute(sentence)
+                if preprocessed_sentence:
+                    yield preprocessed_sentence
             self.current_file += 1
         yield None
 
