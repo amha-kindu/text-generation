@@ -5,6 +5,7 @@ from config import *
 import torch.nn as nn
 from tqdm import tqdm
 from model import GPTmodel
+from datetime import datetime
 from dataset import TextDataset
 import torch.distributed as dist
 from tokenizer import SentencePieceProcessor
@@ -120,15 +121,15 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
         if is_distributed:
             sampler.set_epoch(epoch)
         
-        batch_iterator = tqdm(batch_iterator, desc=f"{LOGGER.name}: Processing epoch {epoch: 02d}", disable = not IS_MASTER)
+        batch_iterator = tqdm(batch_iterator, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mProcessing epoch {epoch: 02d}", disable = not IS_MASTER)
         for batch in batch_iterator:
             model.train() 
                  
             # (N_BATCHES, SEQ_LEN)
-            decoder_input = batch["decoder_input"].to(DEVICE)
+            decoder_input: torch.Tensor = batch["decoder_input"].to(DEVICE)
 
             # (1, SEQ_LEN, SEQ_LEN)
-            decoder_mask = batch["decoder_mask"].to(DEVICE)
+            decoder_mask: torch.Tensor = batch["decoder_mask"].to(DEVICE)
             
             # (N_BATCHES, SEQ_LEN)
             label: torch.Tensor = batch['label'].to(DEVICE)

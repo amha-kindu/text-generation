@@ -16,7 +16,7 @@ class AmharicPreprocessor(PreprocessingPipeline):
     def __init__(self) -> None:
         super().__init__()
         self.extra_whitespace = re.compile(r'\s{2,}')
-        self.non_amharic_chars = re.compile(r'[^\u1200-\u137F0-9\'\"!@#$%*()_\-+=[\]{}|\\:;?./]')
+        self.non_amharic_chars = re.compile(r'[^\u1200-\u137F0-9\s\'\"!@#$%*()_\-+=[\]{}|\\:;?./]')
         self.normalization_patterns = [
             (re.compile('[ሃኅኃሐሓኻ]'), 'ሀ'),
             (re.compile('[ሑኁዅ]'), 'ሁ'),
