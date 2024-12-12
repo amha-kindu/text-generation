@@ -231,17 +231,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    LOGGER.name = "GPU" if torch.cuda.is_available() else "CPU"
     if args.is_distributed:
         assert torch.cuda.device_count() > 1, "Must have more than one CUDA supporting GPUs to initiate distributed training"
         assert args.dist_backend in ["nccl", "gloo" "mpi", "ucc"], "Distributed backend must be one of the following: nccl, gloo, mpi or ucc"
-
-        GLOBAL_RANK = int(os.environ["RANK"])
-        LOCAL_RANK = int(os.environ["LOCAL_RANK"])
-        DEVICE = torch.device(f"cuda:{LOCAL_RANK}")
-        torch.cuda.set_device(DEVICE)
-
-        LOGGER.name = f"GPU {GLOBAL_RANK}" if torch.cuda.is_available() else f"CPU {GLOBAL_RANK}"
 
         dist.init_process_group(backend=args.dist_backend)
 

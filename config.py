@@ -4,21 +4,24 @@ import torch, random, numpy
 random.seed(3000)
 torch.manual_seed(3000)
 numpy.random.seed(3000)
-if torch.cuda.is_available():
-    DEVICE = torch.device('cuda')
-    torch.cuda.manual_seed_all(3000)
-else:
-    DEVICE = torch.device('cpu')
-MIXED_PRECISION_ENABLED = torch.cuda.is_available() and torch.amp.autocast_mode.is_autocast_available(DEVICE.type)
 
-LOGGER = logging.getLogger(str(DEVICE).upper())
-logging.basicConfig(level=logging.INFO, format="\033[95m%(asctime)s - %(levelname)s - %(name)s - %(message)s\033[0m")
-
-GLOBAL_RANK = 0
-LOCAL_RANK = 0
 MASTER_RANK = 0
+GLOBAL_RANK = int(os.getenv("RANK", "0"))
+LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
 WORKING_DIR = os.path.dirname(os.path.realpath(__file__))
 WEIGHTS_DIRECTORY = os.path.join(WORKING_DIR, "weights")
+
+DEVICE = torch.device('cpu')
+MIXED_PRECISION_ENABLED = False
+LOGGER = logging.getLogger(f"CPU {GLOBAL_RANK}")
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(3000)
+    LOGGER = logging.getLogger(f"GPU {GLOBAL_RANK}")
+    DEVICE = torch.device(f'cuda:{LOCAL_RANK}')
+    torch.cuda.set_device(DEVICE)
+    MIXED_PRECISION_ENABLED = torch.amp.autocast_mode.is_autocast_available(DEVICE.type)
+
+logging.basicConfig(level=logging.INFO, format="\033[95m%(asctime)s - %(levelname)s - %(name)s - %(message)s\033[0m")
 
 class Config:
     def to_dict(self):
