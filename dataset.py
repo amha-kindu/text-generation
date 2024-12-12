@@ -19,14 +19,14 @@ class TextDataset(Dataset):
         self.sentences = []
         preprocessor = AmharicPreprocessor()
         with open(file_path, 'r', encoding='utf-8') as f:
-            LOGGER.info(f"\033[93mLoading data from {file_path}...\033[0m")
+            LOGGER.info(f"\033[93mLoading data from {file_path}...\033[0m") if GLOBAL_RANK == MASTER_RANK else None
             for sentence in ijson.items(f, "item"):
                 preprocessed_sentence = preprocessor.execute(sentence)
                 if preprocessed_sentence:
                     self.sentences.append(preprocessed_sentence)
                     if self.sentences and len(self.sentences) % 100000 == 0:
-                        LOGGER.info(f"\033[93mLoaded {len(self.sentences)} from {file_path}\033[0m")
-        LOGGER.info(f"\033[92mDone! Loaded {len(self.sentences)} sentences from {file_path}\033[0m")
+                        LOGGER.info(f"\033[93mLoaded {len(self.sentences)} from {file_path}\033[0m") if GLOBAL_RANK == MASTER_RANK else None
+        LOGGER.info(f"\033[92mDone! Loaded {len(self.sentences)} sentences from {file_path}\033[0m") if GLOBAL_RANK == MASTER_RANK else None
 
     def __len__(self) -> int:
         return len(self.sentences)
