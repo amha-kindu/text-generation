@@ -23,7 +23,7 @@ def test(config: TrainingConfig, model: GPTmodel, test_dataset: TextDataset, is_
     loss_func = nn.CrossEntropyLoss(ignore_index=test_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(DEVICE)
 
     sampler = DistributedSampler(test_dataset, num_replicas=dist.get_world_size(), rank=LOCAL_RANK) if is_distributed else None
-    batch_iterator = tqdm(test_dataset.batch_iterator(config.batch_size, sampler=sampler), desc=f"Evaluating model on test dataset", disable=not IS_MASTER)
+    batch_iterator = tqdm(test_dataset.batch_iterator(config.batch_size, sampler=sampler), desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mModel Evaluation", disable = not IS_MASTER)
 
     evaluation_loss = 0
     for index, batch in enumerate(batch_iterator):
@@ -49,7 +49,7 @@ def test(config: TrainingConfig, model: GPTmodel, test_dataset: TextDataset, is_
                 label.view(-1)
             )
 
-        batch_iterator.set_postfix({"avg test_loss": f"{test_loss.item() / (index + 1):6.3f}"})
+        batch_iterator.set_postfix({"loss": f"{evaluation_loss / (index + 1):6.3f}"})
 
         evaluation_loss += test_loss.item()
     
