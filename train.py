@@ -96,7 +96,6 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
     scaler = torch.GradScaler(device=DEVICE.type) if MIXED_PRECISION_ENABLED else None
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.init_lr, weight_decay=1e-2)
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     
     initial_epoch = 0
     global_step = 0
@@ -180,11 +179,15 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
             if MIXED_PRECISION_ENABLED:
                 scaler.scale(batch_loss).backward()
 
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 batch_loss.backward()
                 
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)                
                 optimizer.step()
 
             

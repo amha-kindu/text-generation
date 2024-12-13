@@ -81,20 +81,16 @@ class MultiHeadAttentionBlock(nn.Module):
         # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
         attention_scores = (query @ key.transpose(2, 3)) / math.sqrt(self.d_head)
 
-        if mask is not None:
-            # Explicitly switch to FP32 for masking
-            with torch.autocast(DEVICE.type, enabled=False):
-                attention_scores = attention_scores.to(torch.float32)
-                attention_scores.masked_fill_(mask == False, -1e09)
-
-            # Cast back to FP16 for subsequent operations
+        # Disable mixed-precision if enabled
+        with torch.autocast(DEVICE.type, enabled=False):
             if MIXED_PRECISION_ENABLED:
-                attention_scores = attention_scores.to(torch.float16)
+                attention_scores = attention_scores.to(torch.float32)
+            attention_scores.masked_fill_(mask == False, -1e09)
 
-        # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
-        attention_scores = torch.softmax(
-            attention_scores, dim=-1
-        )
+            # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
+            attention_scores = torch.softmax(
+                attention_scores, dim=-1
+            )
 
         attention_scores = self.dropout(attention_scores)
 
