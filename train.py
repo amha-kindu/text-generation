@@ -21,7 +21,6 @@ class EarlyStopping:
         self.min_delta = min_delta
         self.counter = 0
         self.best_loss = None
-        self.early_stop = False
 
     def __call__(self, val_loss):
         if self.best_loss is None:
@@ -114,7 +113,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
     
     scaler = torch.GradScaler(device=DEVICE.type) if MIXED_PRECISION_ENABLED else None
 
-    early_stopping = EarlyStopping(patience=3, min_delta=0.02)
+    early_stopping = EarlyStopping(patience=3, min_delta=0.01)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.init_lr, weight_decay=1e-2)
     
     initial_epoch = 0
@@ -136,6 +135,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
     val_sampler = RandomSampler(val_dataset, replacement=True, num_samples=config.validation_samples)
     val_batch_iterator = val_dataset.batch_iterator(config.batch_size, sampler=val_sampler)
 
+    avg_train_loss, avg_val_loss = 0, 0
     for epoch in range(initial_epoch, config.epochs):
         if is_distributed:
             sampler.set_epoch(epoch)
@@ -167,35 +167,35 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
                 )
             
             training_loss += batch_loss.item()
+            avg_train_loss = training_loss / (global_step + 1)
 
             if GLOBAL_RANK == COORDINATOR_RANK:
                 if global_step % 200 == 0:
-                    curr_val_loss = validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
-                    
-                    if early_stopping(curr_val_loss):
+                    validation_loss += validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
+                    avg_val_loss = validation_loss / ((global_step + 1) // 200 + 1)
+
+                    if early_stopping(avg_val_loss):
                         return
-
-                    validation_loss += curr_val_loss
-
+                    
                     writer.add_scalars(
                         "Loss", 
                         { 
-                            "Validation": validation_loss / ((global_step + 1) // 200 + 1)
+                            "Validation": avg_val_loss
                         },
                         global_step
                     )
                 writer.add_scalars(
                     "Loss",
                     {
-                        "Training": training_loss / (global_step + 1)
+                        "Training": avg_train_loss
                     },
                     global_step
                 )
                 writer.flush()
 
             batch_iterator.set_postfix({
-                "train_loss": f"{training_loss / (global_step + 1):6.3f}", 
-                "val_loss": validation_loss / ((global_step + 1) // 200 + 1)
+                "train_loss": f"{avg_train_loss:6.3f}", 
+                "val_loss": f"{avg_val_loss:6.3f}"
             })
 
             # Scale the loss for numerical stability if using mixed-precision and
