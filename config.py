@@ -5,7 +5,7 @@ random.seed(3000)
 torch.manual_seed(3000)
 numpy.random.seed(3000)
 
-MASTER_RANK = 0
+COORDINATOR_RANK = 0
 GLOBAL_RANK = int(os.getenv("RANK", "0"))
 LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
 WORKING_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -54,6 +54,7 @@ class TrainingConfig(Config):
         self.batch_size: int = kwargs.get("batch_size", 64)
         self.init_lr: float = kwargs.get("init_lr", 2e-04)
         self.tb_log_dir: str = kwargs.get("tb_log_dir", "logs")
+        self.checkpoint: str = kwargs.get("checkpoint", "amharic-gpt")
         self.validation_samples: int = kwargs.get("validation_samples", 20)
         self.training_data: str = kwargs.get("training_data", os.path.join(WORKING_DIR, "data", "train_chunk_size_256.json"))
         self.validation_data: str = kwargs.get("validation_data", os.path.join(WORKING_DIR, "data", "validate_chunk_size_256.json"))

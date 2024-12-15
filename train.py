@@ -18,12 +18,11 @@ from torch.utils.data.distributed import DistributedSampler
 @torch.no_grad()
 def test(config: TrainingConfig, model: GPTmodel, test_dataset: TextDataset, is_distributed: bool=False):
     model.eval()
-    IS_MASTER = GLOBAL_RANK == MASTER_RANK
 
     loss_func = nn.CrossEntropyLoss(ignore_index=test_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(DEVICE)
 
     sampler = DistributedSampler(test_dataset, num_replicas=dist.get_world_size(), rank=LOCAL_RANK) if is_distributed else None
-    batch_iterator = tqdm(test_dataset.batch_iterator(config.batch_size, sampler=sampler), desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mModel Evaluation", disable = not IS_MASTER)
+    batch_iterator = tqdm(test_dataset.batch_iterator(config.batch_size, sampler=sampler), desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mModel Evaluation", disable = GLOBAL_RANK != COORDINATOR_RANK)
 
     evaluation_loss = 0
     for index, batch in enumerate(batch_iterator):
@@ -87,7 +86,6 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func: nn.Cros
 
 
 def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset, is_distributed: bool = False, state: dict = {}) -> None:
-    IS_MASTER = GLOBAL_RANK == MASTER_RANK
     writer = SummaryWriter(config.tb_log_dir)
 
     if is_distributed:
@@ -120,7 +118,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
         if is_distributed:
             sampler.set_epoch(epoch)
         
-        batch_iterator = tqdm(batch_iterator, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mProcessing epoch {epoch: 02d}", disable = not IS_MASTER)
+        batch_iterator = tqdm(batch_iterator, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mProcessing epoch {epoch: 02d}", disable = GLOBAL_RANK != COORDINATOR_RANK)
         for batch in batch_iterator:
             model.train() 
                  
@@ -148,7 +146,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
             
             training_loss += batch_loss.item()
 
-            if IS_MASTER:
+            if GLOBAL_RANK == COORDINATOR_RANK:
                 if global_step % 200 == 0:
                     validation_loss += validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
 
@@ -196,8 +194,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
 
             global_step += 1
         
-        if IS_MASTER:
-            model_filename = f"{WEIGHTS_DIRECTORY}/amharic-gpt-base-model-v1.pt"        
+        if GLOBAL_RANK == COORDINATOR_RANK:        
             torch.save({
                 "epoch": epoch,
                 "batch_size": config.batch_size,
@@ -208,7 +205,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
                 "training_loss": training_loss,
                 "validation_loss": validation_loss,
                 "model_config": model.module.config if is_distributed else model.config
-            }, model_filename)
+            }, os.path.join(WEIGHTS_DIRECTORY, f"{config.checkpoint}.pt"))
 
 
 
@@ -221,6 +218,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=DEFAULT_TRAINING_CONFIG.batch_size, help="Batch size used during training")
     parser.add_argument("--init-lr", type=float, default=DEFAULT_TRAINING_CONFIG.init_lr, help="Initial learning rate")
     parser.add_argument("--tb-log-dir", type=str, default=DEFAULT_TRAINING_CONFIG.tb_log_dir, help="Initial learning rate")
+    parser.add_argument("--checkpoint", type=str, default=DEFAULT_TRAINING_CONFIG.checkpoint, help="Filename for the model checkpoint")
     parser.add_argument("--epochs", type=int, default=DEFAULT_TRAINING_CONFIG.epochs, help="Number of epochs to train the model")
     parser.add_argument("--seq-len", type=int, default=DEFAULT_MODEL_CONFIG.seq_len, help="Sequence length of the input")
     parser.add_argument("--d-model", type=int, default=DEFAULT_MODEL_CONFIG.d_model, help="Dimensionality of the model")
@@ -266,9 +264,11 @@ if __name__ == "__main__":
         weights = state["model_state_dict"]
         state.pop("model_state_dict")
 
-    LOGGER.info("Using Mixed Precision (FP16 and FP32) Training" if MIXED_PRECISION_ENABLED else "Using Single Precision (FP32) Training")
-    
     model = GPTmodel.build(model_config, weights).to(DEVICE)
+    
+    if GLOBAL_RANK == COORDINATOR_RANK:
+        LOGGER.info(f"Initiating training with {'mixed-precision' if MIXED_PRECISION_ENABLED else 'single-precision'}...")
+        LOGGER.info(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
     train(training_config, model, train_dataset, val_dataset, args.is_distributed, state)
 

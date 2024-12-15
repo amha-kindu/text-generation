@@ -22,31 +22,31 @@ class PositionEncoder(nn.Module):
         self.dropout = nn.Dropout(dropout)
         
         # (SEQ_LEN, 1)
-        pos = torch.arange(0, seq_len, dtype=torch.float).unsqueeze(1)
+        positions = torch.arange(0, seq_len, dtype=torch.float).unsqueeze(1)
 
         # (D_MODEL//2,)
         div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * -math.log(10000.0) / d_model)
 
         # (SEQ_LEN, D_MODEL)
-        self.pe: torch.Tensor = torch.zeros(seq_len, d_model)
+        position_encodings: torch.Tensor = torch.zeros(seq_len, d_model)
 
-        # PE(pos, 2i) = sin(pos / (10000 ^ (2i/dmodel)))
-        # PE(pos, 2i) = sin(pos * exp(-2i * log(10000) / dmodel))
-        self.pe[:, ::2] = torch.sin(pos * div_term)
+        # PE(positions, 2i) = sin(positions / (10000 ^ (2i/dmodel)))
+        # PE(positions, 2i) = sin(positions * exp(-2i * log(10000) / dmodel))
+        position_encodings[:, ::2] = torch.sin(positions * div_term)
 
-        # PE(pos, 2i+1) = cos(pos / (10000 ^ (2i/dmodel)))
-        # PE(pos, 2i+1) = cos(pos * exp(-2i * log(10000) / dmodel))
-        self.pe[:, 1::2] = torch.cos(pos * div_term)
+        # PE(positions, 2i+1) = cos(positions / (10000 ^ (2i/dmodel)))
+        # PE(positions, 2i+1) = cos(positions * exp(-2i * log(10000) / dmodel))
+        position_encodings[:, 1::2] = torch.cos(positions * div_term)
 
         # (SEQ_LEN, D_MODEL) --> (1, SEQ_LEN, D_MODEL)
-        self.pe = self.pe.unsqueeze(0)
+        position_encodings = position_encodings.unsqueeze(0)
 
-        self.register_buffer("pe_no_grad", self.pe)
+        self.register_buffer("position_encodings", position_encodings)
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL)
     # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.dropout(x + self.pe_no_grad.requires_grad_(False))
+        return self.dropout(x + self.position_encodings.requires_grad_(False))
 
 
 class MultiHeadAttentionBlock(nn.Module):
@@ -66,7 +66,7 @@ class MultiHeadAttentionBlock(nn.Module):
     
     # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
         # (N_BATCHES, SEQ_LEN, D_MODEL) @ (D_MODEL, D_MODEL) --> (N_BATCHES, SEQ_LEN, D_MODEL)
         query: torch.Tensor = self.Wq(x)
         key: torch.Tensor = self.Wk(x)
@@ -80,17 +80,21 @@ class MultiHeadAttentionBlock(nn.Module):
         # (N_BATCHES, HEADS, SEQ_LEN, d_head) @ (N_BATCHES, HEADS, d_head, SEQ_LEN)
         # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
         attention_scores = (query @ key.transpose(2, 3)) / math.sqrt(self.d_head)
+        
+        if mask is not None:
+            # Disable mixed-precision if enabled
+            with torch.autocast(DEVICE.type, enabled=False):
+                if MIXED_PRECISION_ENABLED:
+                    attention_scores = attention_scores.to(torch.float32)
+                attention_scores.masked_fill_(mask == False, -1e09)
 
-        # Disable mixed-precision if enabled
-        with torch.autocast(DEVICE.type, enabled=False):
+                # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
+                attention_scores = torch.softmax(
+                    attention_scores, dim=-1
+                )
+
             if MIXED_PRECISION_ENABLED:
-                attention_scores = attention_scores.to(torch.float32)
-            attention_scores.masked_fill_(mask == False, -1e09)
-
-            # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
-            attention_scores = torch.softmax(
-                attention_scores, dim=-1
-            )
+                attention_scores = attention_scores.to(torch.float16)
 
         attention_scores = self.dropout(attention_scores)
 
@@ -139,15 +143,17 @@ class ResidualConnection(nn.Module):
 class DecoderBlock(nn.Module):
     def __init__(self, d_model: int, dff: int, dropout: float, heads: int):
         super().__init__()
-        self.attention_head = MultiHeadAttentionBlock(d_model, dropout, heads)
         self.feed_forward = FeedForwardBlock(d_model, dff, dropout)
-        self.residual_connections = nn.ModuleList([ResidualConnection(d_model, dropout) for _ in range(2)])
+        self.multihead_attention = MultiHeadAttentionBlock(d_model, dropout, heads)
+        self.masked_multihead_attention = MultiHeadAttentionBlock(d_model, dropout, heads)
+        self.residual_connections = nn.ModuleList([ResidualConnection(d_model, dropout) for _ in range(3)])
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
     def forward(self, x: torch.Tensor, mask: torch.Tensor):
-        x = self.residual_connections[0](x, lambda x: self.attention_head(x, mask))
-        x = self.residual_connections[1](x, self.feed_forward)
+        x = self.residual_connections[0](x, lambda x: self.masked_multihead_attention(x, mask))
+        x = self.residual_connections[1](x, lambda x: self.multihead_attention(x, None))
+        x = self.residual_connections[2](x, self.feed_forward)
         return x
 
 
