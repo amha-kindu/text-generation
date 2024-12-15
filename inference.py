@@ -69,7 +69,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    if not os.path.exists(args.preload_weights):
+    if not os.path.exists(args.preload_weights) and not os.path.isfile(args.preload_weights):
         raise FileNotFoundError(f"File {args.preload_weights} does not exist")
     
     LOGGER.info(f"Preloading model weights {args.preload_weights}...")
@@ -93,7 +93,15 @@ if __name__ == '__main__':
     )
     inference_engine = GptInferenceEngine(model, tokenizer)
 
-    user_input = input("Enter amharic text to complete: ")
-    LOGGER.info(
-        inference_engine.complete(user_input, model_config.seq_len)
-    )
+    while True:
+        user_input = input("Enter Amharic text to complete (or type 'exit' to stop): ")
+
+        if user_input.lower() == 'exit':
+            LOGGER.info("Exiting the program.")
+            break
+
+        try:
+            completed_text = inference_engine.complete(user_input, model_config.seq_len)
+            LOGGER.info(completed_text)
+        except Exception as e:
+            LOGGER.error(f"Error during inference: {e}")

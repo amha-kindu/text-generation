@@ -68,8 +68,11 @@ class TextDataset(Dataset):
             # (len(token_ids) - 1,)
             torch.tensor(token_ids[1:], dtype=torch.int64),
 
+            # (1,)
+            torch.tensor([self.eos_token.item()], dtype=torch.int64),
+
             # (padding,)
-            torch.tensor([self.pad_token.item()] * padding, dtype=torch.int64)
+            torch.tensor([self.pad_token.item()] * (padding - 1), dtype=torch.int64)
         ])[:decoder_input.size(0)]
 
         return {

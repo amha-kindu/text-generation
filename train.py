@@ -15,6 +15,27 @@ from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 
 
+class EarlyStopping:
+    def __init__(self, patience=5, min_delta=0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_loss = None
+        self.early_stop = False
+
+    def __call__(self, val_loss):
+        if self.best_loss is None:
+            self.best_loss = val_loss
+        elif val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        return False
+
+
 @torch.no_grad()
 def test(config: TrainingConfig, model: GPTmodel, test_dataset: TextDataset, is_distributed: bool=False):
     model.eval()
@@ -93,6 +114,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
     
     scaler = torch.GradScaler(device=DEVICE.type) if MIXED_PRECISION_ENABLED else None
 
+    early_stopping = EarlyStopping(patience=3, min_delta=0.02)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.init_lr, weight_decay=1e-2)
     
     initial_epoch = 0
@@ -148,7 +170,12 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
 
             if GLOBAL_RANK == COORDINATOR_RANK:
                 if global_step % 200 == 0:
-                    validation_loss += validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
+                    curr_val_loss = validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
+                    
+                    if early_stopping(curr_val_loss):
+                        return
+
+                    validation_loss += curr_val_loss
 
                     writer.add_scalars(
                         "Loss", 
