@@ -173,9 +173,6 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
                 if global_step % 200 == 0:
                     validation_loss += validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
                     avg_val_loss = validation_loss / ((global_step + 1) // 200 + 1)
-
-                    if early_stopping(avg_val_loss):
-                        return
                     
                     writer.add_scalars(
                         "Loss", 
@@ -220,6 +217,9 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
             optimizer.zero_grad()
 
             global_step += 1
+
+        if early_stopping(avg_val_loss):
+            break
         
         if GLOBAL_RANK == COORDINATOR_RANK:        
             torch.save({
