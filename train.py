@@ -217,7 +217,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
             global_step += 1
 
         if early_stopping(avg_val_loss):
-            break
+            return
         
         if GLOBAL_RANK == COORDINATOR_RANK:        
             torch.save({

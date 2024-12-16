@@ -1,6 +1,8 @@
 import torch
 import argparse
+import traceback
 from config import *
+from dataset import TextDataset
 from model import GPTmodel
 from preprocessor import AmharicPreprocessor
 from tokenizer import SentencePieceProcessor
@@ -23,38 +25,33 @@ class GptInferenceEngine:
     def complete(self, text: str, max_len: int) -> str:
         text = self.preprocessor.execute(text)
         token_ids = self.tokenizer.Encode(text, out_type=int)
-        padding = model.config.seq_len - len(token_ids)
 
-        # (1, SEQ_LEN)
-        decoder_input = torch.concat([
-            torch.tensor(token_ids, dtype=torch.int64),
-            torch.tensor([self.pad_id] * padding, dtype=torch.int64)
-        ]).unsqueeze(0).to(DEVICE)
+        # (1, len(token_ids))
+        decoder_input = torch.tensor([token_ids], dtype=torch.int64, device=DEVICE)
 
         predicted_token = None
-        non_pad_tokens = len(token_ids)
-        while non_pad_tokens > 0 and non_pad_tokens < max_len and predicted_token != self.eos_id:
+        while token_ids and decoder_input.size(1) < max_len and predicted_token != self.eos_id:
+            # (1, len(token_ids), len(token_ids))
+            decoder_mask = TextDataset.lookback_mask(decoder_input.size(1)).to(DEVICE)
             with torch.autocast(device_type=DEVICE.type, enabled=MIXED_PRECISION_ENABLED):
                 # (1, SEQ_LEN, VOCAB_SIZE)
-                logits = self.model(decoder_input)
+                logits = self.model(decoder_input, decoder_mask)
 
             # (1, VOCAB_SIZE)
-            next_token_logits = logits[:, non_pad_tokens - 1]
+            next_token_logits = logits[:, -1]
 
             # Evaluate the probability distribution across the VOCAB_SIZE
             # dimension using softmax - (1, VOCAB_SIZE)
             probab_distribution = torch.softmax(next_token_logits, dim=1)
 
-            # Get the top 5 tokens with the highest probabilities
-            _, top_k_tokens = torch.topk(probab_distribution, k=self.top_k, dim=1)
-
-            # Randomly pick from the top 5 most probable tokens
-            predicted_token = top_k_tokens[0, torch.randint(0, self.top_k, (1,)).item()]
+            # Get the token with the highest probabilities
+            _, predicted_token = torch.max(probab_distribution, dim=1)
 
             # Add the predicted token to the decoder input for the subsequent iterations
-            decoder_input[:, non_pad_tokens] = predicted_token.item()
-
-            non_pad_tokens += 1
+            decoder_input = torch.concat([
+                decoder_input,
+                predicted_token.unsqueeze(1)
+            ], dim=1)
 
         # Remove the batch dimension
         # (1, SEQ_LEN) ---> (SEQ_LEN,)
@@ -104,4 +101,5 @@ if __name__ == '__main__':
             completed_text = inference_engine.complete(user_input, model_config.seq_len)
             LOGGER.info(completed_text)
         except Exception as e:
+            traceback.print_exc()
             LOGGER.error(f"Error during inference: {e}")
