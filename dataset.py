@@ -52,12 +52,12 @@ class TextDataset(Dataset):
         
         # Preprocess and tokenize
         token_ids = self.tokenizer.Encode(text, out_type=int)
-        padding = self.tokenizer.max_len - len(token_ids) + 1
+        padding = self.tokenizer.max_len - len(token_ids)
 
         # (SEQ_LEN,)
         decoder_input = torch.concat([
-            # (len(token_ids) - 1,)
-            torch.tensor(token_ids[:-1], dtype=torch.int64),
+            # (len(token_ids),)
+            torch.tensor(token_ids, dtype=torch.int64),
 
             # (padding,)
             torch.tensor([self.pad_token.item()] * padding, dtype=torch.int64)
@@ -72,7 +72,7 @@ class TextDataset(Dataset):
             torch.tensor([self.eos_token.item()], dtype=torch.int64),
 
             # (padding,)
-            torch.tensor([self.pad_token.item()] * (padding - 1), dtype=torch.int64)
+            torch.tensor([self.pad_token.item()] * padding, dtype=torch.int64)
         ])[:decoder_input.size(0)]
 
         return {
