@@ -57,7 +57,6 @@ def test(config: TrainingConfig, model: GPTmodel, test_dataset: TextDataset, is_
             # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
             logits: torch.Tensor = model(decoder_input, decoder_mask)
 
-            # Compute the training loss
             test_loss: torch.Tensor = loss_func(
                 # (N_BATCHES, SEQ_LEN, VOCAB_SIZE) --> (N_BATCHES * SEQ_LEN, VOCAB_SIZE)
                 logits.view(-1, model.config.vocab_size),
@@ -90,7 +89,6 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func: nn.Cros
             # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
             logits: torch.Tensor = model(decoder_input, decoder_mask)
 
-            # Compute the cross-entropy loss
             loss: torch.Tensor = loss_func(
                 # (N_BATCHES, SEQ_LEN, VOCAB_SIZE) --> (N_BATCHES * SEQ_LEN, VOCAB_SIZE)
                 logits.view(-1, model.config.vocab_size),
@@ -111,6 +109,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
     
     scaler = torch.GradScaler(device=DEVICE.type) if MIXED_PRECISION_ENABLED else None
 
+    stop_signal = torch.tensor([0], device=DEVICE)
     early_stopping = EarlyStopping(patience=3, min_delta=0.01)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.init_lr, weight_decay=1e-2)
     
@@ -138,7 +137,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
         if is_distributed:
             sampler.set_epoch(epoch)
         
-        batch_iterator = tqdm(batch_iterator, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mProcessing epoch {epoch: 02d}", disable = GLOBAL_RANK != COORDINATOR_RANK)
+        batch_iterator = tqdm(batch_iterator, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch}", disable = GLOBAL_RANK != COORDINATOR_RANK)
         for batch in batch_iterator:
             model.train() 
                  
@@ -193,9 +192,6 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
                 "val_loss": f"{avg_val_loss:6.3f}"
             })
 
-            # Scale the loss for numerical stability if using mixed-precision and
-            # Perform the backward pass on the computation graph built during the forward pass, 
-            # in order to calculate the grad for each of the intermediate and leaf tensors on the computation graph
             if MIXED_PRECISION_ENABLED:
                 scaler.scale(batch_loss).backward()
 
@@ -210,14 +206,20 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)                
                 optimizer.step()
 
-            
-            # Zero the gradients of the model parameters to prevent gradient accumulation 
             optimizer.zero_grad()
 
             global_step += 1
 
-        if early_stopping(avg_val_loss):
-            return
+        stop_training = early_stopping(avg_val_loss)
+
+        stop_signal[0] = 1 if stop_training else 0
+        if is_distributed:
+            dist.all_reduce(stop_signal, op=dist.ReduceOp.SUM)
+
+        if stop_signal.item() > 0:
+            if GLOBAL_RANK == COORDINATOR_RANK:
+                LOGGER.info(f"Early stopping triggered at epoch {epoch+1}")
+            break       
         
         if GLOBAL_RANK == COORDINATOR_RANK:        
             torch.save({
@@ -231,6 +233,9 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
                 "validation_loss": validation_loss,
                 "model_config": model.module.config if is_distributed else model.config
             }, os.path.join(WEIGHTS_DIRECTORY, f"{config.checkpoint}.pt"))
+
+    if is_distributed:
+        dist.barrier()
 
 
 
@@ -293,6 +298,7 @@ if __name__ == "__main__":
     
     if GLOBAL_RANK == COORDINATOR_RANK:
         LOGGER.info(f"Initiating training with {'mixed-precision' if MIXED_PRECISION_ENABLED else 'single-precision'}...")
+        LOGGER.info(f"Model size(MB): {sum(p.numel() for p in model.parameters()) * 4 / (1024 ** 2):.2f}MB")
         LOGGER.info(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
     train(training_config, model, train_dataset, val_dataset, args.is_distributed, state)

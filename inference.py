@@ -82,7 +82,7 @@ if __name__ == '__main__':
     LOGGER.info(f"Total Parameters: {total_params}")
     LOGGER.info(f"Trainable Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     LOGGER.info(f"Model Size(MB): {total_params * 4 / (1024 ** 2):.2f}MB")
-    LOGGER.info("Using Mixed Precision (FP16 and FP32) Training" if MIXED_PRECISION_ENABLED else "Using Single Precision (FP32) Training")
+    LOGGER.info(f"Initiating inference with {'mixed-precision' if MIXED_PRECISION_ENABLED else 'single-precision'}...")
     
     tokenizer = SentencePieceProcessor(model_config.seq_len)
     tokenizer.LoadFromFile(
