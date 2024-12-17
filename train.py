@@ -298,7 +298,7 @@ if __name__ == "__main__":
     
     if GLOBAL_RANK == COORDINATOR_RANK:
         LOGGER.info(f"Initiating training with {'mixed-precision' if MIXED_PRECISION_ENABLED else 'single-precision'}...")
-        LOGGER.info(f"Model size(MB): {sum(p.numel() for p in model.parameters()) * 4 / (1024 ** 2):.2f}MB")
+        LOGGER.info(f"Model size: {sum(p.numel() for p in model.parameters()) * 4 / (1024 ** 2):.2f}MB")
         LOGGER.info(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
     train(training_config, model, train_dataset, val_dataset, args.is_distributed, state)

@@ -66,16 +66,16 @@ class MultiHeadAttentionBlock(nn.Module):
     
     # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
-    def forward(self, x: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+    def forward(self, key: torch.Tensor, query: torch.Tensor, value: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
         # (N_BATCHES, SEQ_LEN, D_MODEL) @ (D_MODEL, D_MODEL) --> (N_BATCHES, SEQ_LEN, D_MODEL)
-        query: torch.Tensor = self.Wq(x)
-        key: torch.Tensor = self.Wk(x)
-        value: torch.Tensor = self.Wv(x)
+        key: torch.Tensor = self.Wk(key)
+        query: torch.Tensor = self.Wq(query)
+        value: torch.Tensor = self.Wv(value)
 
         # (N_BATCHES, SEQ_LEN, D_MODEL) --> (N_BATCHES, SEQ_LEN, HEADS, d_head) --> (N_BATCHES, HEADS, SEQ_LEN, d_head)
-        query = query.view(x.shape[0], x.shape[1], self.heads, -1).transpose(1, 2)
-        key = key.view(x.shape[0], x.shape[1], self.heads, -1).transpose(1, 2)
-        value = value.view(x.shape[0], x.shape[1], self.heads, -1).transpose(1, 2)
+        query = query.view(query.shape[0], query.shape[1], self.heads, -1).transpose(1, 2)
+        key = key.view(key.shape[0], key.shape[1], self.heads, -1).transpose(1, 2)
+        value = value.view(value.shape[0], value.shape[1], self.heads, -1).transpose(1, 2)
 
         # (N_BATCHES, HEADS, SEQ_LEN, d_head) @ (N_BATCHES, HEADS, d_head, SEQ_LEN)
         # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
@@ -106,7 +106,7 @@ class MultiHeadAttentionBlock(nn.Module):
         output = output.transpose(1, 2)
 
         # (N_BATCHES, SEQ_LEN, head, d_head) -> (N_BATCHES, SEQ_LEN, D_MODEL)
-        output = output.contiguous().view(x.shape[0], x.shape[1], -1)
+        output = output.contiguous().view(value.shape[0], value.shape[2], -1)
         
         return self.Wo(output)
     
@@ -151,8 +151,8 @@ class DecoderBlock(nn.Module):
     # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
     def forward(self, x: torch.Tensor, mask: torch.Tensor):
-        x = self.residual_connections[0](x, lambda x: self.masked_multihead_attention(x, mask))
-        x = self.residual_connections[1](x, lambda x: self.multihead_attention(x, None))
+        x = self.residual_connections[0](x, lambda t: self.masked_multihead_attention(t, t, t, mask))
+        x = self.residual_connections[1](x, lambda m: self.multihead_attention(m, m, m, None))
         x = self.residual_connections[2](x, self.feed_forward)
         return x
 
