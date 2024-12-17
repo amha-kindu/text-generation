@@ -62,15 +62,15 @@ class GptInferenceEngine:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train a GPT model")
-    parser.add_argument("--preload-weights", type=str, required=True, help="File path to load saved weights")
+    parser.add_argument("--load-checkpoint", type=str, required=True, help="File path to load saved weights")
 
     args = parser.parse_args()
 
-    if not os.path.exists(args.preload_weights) and not os.path.isfile(args.preload_weights):
-        raise FileNotFoundError(f"File {args.preload_weights} does not exist")
+    if not os.path.exists(args.load_checkpoint) and not os.path.isfile(args.load_checkpoint):
+        raise FileNotFoundError(f"File {args.load_checkpoint} does not exist")
     
-    LOGGER.info(f"Preloading model weights {args.preload_weights}...")
-    checkpoint: dict = torch.load(args.preload_weights, map_location=DEVICE)
+    LOGGER.info(f"Preloading model weights {args.load_checkpoint}...")
+    checkpoint: dict = torch.load(args.load_checkpoint, map_location=DEVICE)
 
     model_config: ModelConfig = checkpoint["model_config"]
 

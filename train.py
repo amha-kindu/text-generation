@@ -122,6 +122,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
         global_step = state["global_step"]
         training_loss = state["training_loss"]
         validation_loss = state["validation_loss"]
+        early_stopping.best_loss = state["best_val_loss"]
         optimizer.load_state_dict(state["optimizer_state_dict"])
 
     loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(DEVICE)
@@ -132,7 +133,8 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
     val_sampler = RandomSampler(val_dataset, replacement=True, num_samples=config.validation_samples)
     val_batch_iterator = val_dataset.batch_iterator(config.batch_size, sampler=val_sampler)
 
-    avg_train_loss, avg_val_loss = 0, 0
+    avg_train_loss = training_loss / (global_step + 1)
+    avg_val_loss = validation_loss / (global_step // 200 + 1)
     for epoch in range(initial_epoch, config.epochs):
         if is_distributed:
             sampler.set_epoch(epoch)
@@ -169,7 +171,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
             if GLOBAL_RANK == COORDINATOR_RANK:
                 if global_step % 200 == 0:
                     validation_loss += validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
-                    avg_val_loss = validation_loss / ((global_step + 1) // 200 + 1)
+                    avg_val_loss = validation_loss / (global_step // 200 + 1)
                     
                     writer.add_scalars(
                         "Loss", 
@@ -212,16 +214,15 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
 
         stop_training = early_stopping(avg_val_loss)
 
-        stop_signal[0] = 1 if stop_training else 0
+        stop_signal[0] = int(stop_training)
         if is_distributed:
-            dist.all_reduce(stop_signal, op=dist.ReduceOp.SUM)
-
-        if stop_signal.item() > 0:
-            if GLOBAL_RANK == COORDINATOR_RANK:
-                LOGGER.info(f"Early stopping triggered at epoch {epoch+1}")
-            break       
+            dist.broadcast(stop_signal, src=COORDINATOR_RANK)
         
-        if GLOBAL_RANK == COORDINATOR_RANK:        
+        if stop_signal.item() > 0:
+            LOGGER.info(f"Early stopping triggered at epoch {epoch+1} with avg val loss {avg_val_loss}")
+            break
+
+        if GLOBAL_RANK == COORDINATOR_RANK:
             torch.save({
                 "epoch": epoch,
                 "batch_size": config.batch_size,
@@ -230,6 +231,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
                 "optimizer_state_dict": optimizer.state_dict(),
                 "global_step": global_step,
                 "training_loss": training_loss,
+                "best_val_loss": early_stopping.best_loss,
                 "validation_loss": validation_loss,
                 "model_config": model.module.config if is_distributed else model.config
             }, os.path.join(WEIGHTS_DIRECTORY, f"{config.checkpoint}.pt"))
@@ -248,7 +250,6 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=DEFAULT_TRAINING_CONFIG.batch_size, help="Batch size used during training")
     parser.add_argument("--init-lr", type=float, default=DEFAULT_TRAINING_CONFIG.init_lr, help="Initial learning rate")
     parser.add_argument("--tb-log-dir", type=str, default=DEFAULT_TRAINING_CONFIG.tb_log_dir, help="Initial learning rate")
-    parser.add_argument("--checkpoint", type=str, default=DEFAULT_TRAINING_CONFIG.checkpoint, help="Filename for the model checkpoint")
     parser.add_argument("--epochs", type=int, default=DEFAULT_TRAINING_CONFIG.epochs, help="Number of epochs to train the model")
     parser.add_argument("--seq-len", type=int, default=DEFAULT_MODEL_CONFIG.seq_len, help="Sequence length of the input")
     parser.add_argument("--d-model", type=int, default=DEFAULT_MODEL_CONFIG.d_model, help="Dimensionality of the model")
@@ -258,7 +259,8 @@ if __name__ == "__main__":
     parser.add_argument("--dropout", type=float, default=DEFAULT_MODEL_CONFIG.dropout, help="Dropout probability")
     parser.add_argument("--dff", type=int, default=DEFAULT_MODEL_CONFIG.dff, help="Dimensionality of the feed forward layer")
     parser.add_argument("--dist-backend", type=str, default="nccl", help="Distributed backend")
-    parser.add_argument("--preload-weights", type=str, default="", help="File path to load saved weights")
+    parser.add_argument("--load-checkpoint", type=str, default="", help="File path to load saved weights")
+    parser.add_argument("--checkpoint", type=str, default=DEFAULT_TRAINING_CONFIG.checkpoint, help="Filename for the model checkpoint")
     parser.add_argument("--validation-samples", type=int, default=DEFAULT_TRAINING_CONFIG.validation_samples, help="Number of samples to use for a single validation run")
 
     args = parser.parse_args()
@@ -285,12 +287,12 @@ if __name__ == "__main__":
     test_dataset = TextDataset(training_config.testing_data, tokenizer)
 
     state, weights = {}, {}
-    if args.preload_weights:
-        if not os.path.exists(args.preload_weights):
-            raise FileNotFoundError(f"File {args.preload_weights} does not exist")
+    if args.load_checkpoint:
+        if not os.path.exists(args.load_checkpoint):
+            raise FileNotFoundError(f"File {args.load_checkpoint} does not exist")
         
-        LOGGER.info(f"Preloading model weights {args.preload_weights}...")
-        state: dict = torch.load(args.preload_weights, map_location=DEVICE)
+        LOGGER.info(f"Preloading model weights {args.load_checkpoint}...")
+        state: dict = torch.load(args.load_checkpoint, map_location=DEVICE)
         weights = state["model_state_dict"]
         state.pop("model_state_dict")
 

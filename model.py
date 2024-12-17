@@ -144,16 +144,14 @@ class DecoderBlock(nn.Module):
     def __init__(self, d_model: int, dff: int, dropout: float, heads: int):
         super().__init__()
         self.feed_forward = FeedForwardBlock(d_model, dff, dropout)
-        self.multihead_attention = MultiHeadAttentionBlock(d_model, dropout, heads)
         self.masked_multihead_attention = MultiHeadAttentionBlock(d_model, dropout, heads)
-        self.residual_connections = nn.ModuleList([ResidualConnection(d_model, dropout) for _ in range(3)])
+        self.residual_connections = nn.ModuleList([ResidualConnection(d_model, dropout) for _ in range(2)])
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
     def forward(self, x: torch.Tensor, mask: torch.Tensor):
         x = self.residual_connections[0](x, lambda t: self.masked_multihead_attention(t, t, t, mask))
-        x = self.residual_connections[1](x, lambda m: self.multihead_attention(m, m, m, None))
-        x = self.residual_connections[2](x, self.feed_forward)
+        x = self.residual_connections[1](x, self.feed_forward)
         return x
 
 
