@@ -126,32 +126,32 @@ class FeedForwardBlock(nn.Module):
                 torch.relu(self.linear1(x))
             )
         )
-        
 
-class ResidualConnection(nn.Module):
+
+class AddAndNorm(nn.Module):
     def __init__(self, d_model: int, dropout: float):
         super().__init__()
         self.layer_norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-    # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL)
+    # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL), y -> (N_BATCHES, SEQ_LEN, D_MODEL)
     # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
-    def forward(self, x: torch.Tensor, sublayer: nn.Module):
-        return x + self.dropout(sublayer(self.layer_norm(x)))
-        
+    def forward(self, x: torch.Tensor, y: torch.Tensor):
+        return x + self.dropout(self.layer_norm(y))
+       
 
 class DecoderBlock(nn.Module):
     def __init__(self, d_model: int, dff: int, dropout: float, heads: int):
         super().__init__()
         self.feed_forward = FeedForwardBlock(d_model, dff, dropout)
         self.masked_multihead_attention = MultiHeadAttentionBlock(d_model, dropout, heads)
-        self.residual_connections = nn.ModuleList([ResidualConnection(d_model, dropout) for _ in range(2)])
+        self.add_and_norm = nn.ModuleList([AddAndNorm(d_model, dropout) for _ in range(2)])
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN, D_MODEL), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, D_MODEL)
     def forward(self, x: torch.Tensor, mask: torch.Tensor):
-        x = self.residual_connections[0](x, lambda t: self.masked_multihead_attention(t, t, t, mask))
-        x = self.residual_connections[1](x, self.feed_forward)
+        x = self.add_and_norm[0](x, self.masked_multihead_attention(x, x, x, mask))
+        x = self.add_and_norm[1](x, self.feed_forward(x))
         return x
 
 

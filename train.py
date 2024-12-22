@@ -103,6 +103,7 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func: nn.Cros
 
 def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset, is_distributed: bool = False, state: dict = {}) -> None:
     writer = SummaryWriter(config.tb_log_dir)
+    writer.add_graph(model, input_to_model=torch.randint(0, 100, (1, model.config.seq_len)).to(DEVICE))
 
     if is_distributed:
         model = DistributedDataParallel(model, device_ids=[LOCAL_RANK])
