@@ -22,8 +22,6 @@ class TextDataset(Dataset):
         with open(file_path, 'r', encoding='utf-8') as f:
             LOGGER.info(f"\033[93mLoading data from {file_name}...\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
             for sentence in ijson.items(f, "item"):
-                if len(self.sentences) == 10000:
-                    break
                 preprocessed_sentence = preprocessor.execute(sentence)
                 if preprocessed_sentence:
                     self.sentences.append(preprocessed_sentence)
