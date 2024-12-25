@@ -137,8 +137,7 @@ class AddAndNorm(nn.Module):
     # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM), y -> (N_BATCHES, SEQ_LEN, EMBED_DIM)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
     def forward(self, x: torch.Tensor, y: torch.Tensor):
-        return self.layer_norm(x + self.dropout(y))
-       
+        return x + self.dropout(self.layer_norm(y))
 
 class DecoderBlock(nn.Module):
     def __init__(self, embed_dim: int, ff_dim: int, dropout: float, heads: int):
@@ -183,6 +182,7 @@ class GPTmodel(nn.Module):
         self.embedding = Embedding(embed_dim, vocab_size)
         self.position_encoder = PositionEncoder(seq_len, embed_dim, dropout)
         self.projection = Projection(embed_dim, vocab_size)
+        self.layer_norm = nn.LayerNorm(embed_dim)
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
@@ -200,7 +200,7 @@ class GPTmodel(nn.Module):
     def _decode(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         for decoder in self.decoders:
             x = decoder(x, mask)
-        return x
+        return self.layer_norm(x)
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
