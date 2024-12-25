@@ -272,6 +272,9 @@ if __name__ == "__main__":
 
         dist.init_process_group(backend=args.dist_backend)
 
+    if args.load_checkpoint:
+        args.checkpoint = args.load_checkpoint.split(".pt")[0]
+
     assert args.embed_dim % args.heads == 0, "embed_dim must be divisible by heads"
 
     training_config = TrainingConfig(**args.__dict__)
