@@ -39,10 +39,10 @@ class Config:
 
 class ModelConfig(Config):
     def __init__(self, **kwargs):
-        self.d_model: int = kwargs.get("d_model", 512)
+        self.embed_dim: int = kwargs.get("embed_dim", 512)
         self.n_blocks: int = kwargs.get("n_blocks", 6)
         self.vocab_size: int = kwargs.get("vocab_size", 25000)
-        self.dff: int = kwargs.get("dff", 2048)
+        self.ff_dim: int = kwargs.get("ff_dim", 2048)
         self.heads: int = kwargs.get("heads", 8)
         self.dropout: float = kwargs.get("dropout", 0.1)
         self.seq_len: int = kwargs.get("seq_len", 50)

@@ -22,6 +22,8 @@ class TextDataset(Dataset):
         with open(file_path, 'r', encoding='utf-8') as f:
             LOGGER.info(f"\033[93mLoading data from {file_name}...\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
             for sentence in ijson.items(f, "item"):
+                if len(self.sentences) == 10000:
+                    break
                 preprocessed_sentence = preprocessor.execute(sentence)
                 if preprocessed_sentence:
                     self.sentences.append(preprocessed_sentence)
@@ -56,11 +58,11 @@ class TextDataset(Dataset):
 
         # (SEQ_LEN,)
         decoder_input = torch.concat([
-            # (len(token_ids),)
-            torch.tensor(token_ids, dtype=torch.int64),
+            # (len(token_ids) - 1,)
+            torch.tensor(token_ids[:-1], dtype=torch.int64),
 
             # (padding,)
-            torch.tensor([self.pad_token.item()] * padding, dtype=torch.int64)
+            torch.tensor([self.pad_token.item()] * (padding + 1), dtype=torch.int64)
         ])[:self.tokenizer.max_len]
 
         # (SEQ_LEN,)

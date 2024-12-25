@@ -253,12 +253,12 @@ if __name__ == "__main__":
     parser.add_argument("--tb-log-dir", type=str, default=DEFAULT_TRAINING_CONFIG.tb_log_dir, help="Initial learning rate")
     parser.add_argument("--epochs", type=int, default=DEFAULT_TRAINING_CONFIG.epochs, help="Number of epochs to train the model")
     parser.add_argument("--seq-len", type=int, default=DEFAULT_MODEL_CONFIG.seq_len, help="Sequence length of the input")
-    parser.add_argument("--d-model", type=int, default=DEFAULT_MODEL_CONFIG.d_model, help="Dimensionality of the model")
+    parser.add_argument("--embed-dim", type=int, default=DEFAULT_MODEL_CONFIG.embed_dim, help="Dimensionality of the model")
     parser.add_argument("--n-blocks", type=int, default=DEFAULT_MODEL_CONFIG.n_blocks, help="Number of decoder blocks")
     parser.add_argument("--heads", type=int, default=DEFAULT_MODEL_CONFIG.heads, help="Number of attention heads")
     parser.add_argument("--vocab-size", type=int, default=DEFAULT_MODEL_CONFIG.vocab_size, help="Vocabulary size to use")
     parser.add_argument("--dropout", type=float, default=DEFAULT_MODEL_CONFIG.dropout, help="Dropout probability")
-    parser.add_argument("--dff", type=int, default=DEFAULT_MODEL_CONFIG.dff, help="Dimensionality of the feed forward layer")
+    parser.add_argument("--ff-dim", type=int, default=DEFAULT_MODEL_CONFIG.ff_dim, help="Dimensionality of the feed forward layer")
     parser.add_argument("--dist-backend", type=str, default="nccl", help="Distributed backend")
     parser.add_argument("--load-checkpoint", type=str, default="", help="File path to load saved weights")
     parser.add_argument("--checkpoint", type=str, default=DEFAULT_TRAINING_CONFIG.checkpoint, help="Filename for the model checkpoint")
@@ -272,7 +272,7 @@ if __name__ == "__main__":
 
         dist.init_process_group(backend=args.dist_backend)
 
-    assert args.d_model % args.heads == 0, "d_model must be divisible by heads"
+    assert args.embed_dim % args.heads == 0, "embed_dim must be divisible by heads"
 
     training_config = TrainingConfig(**args.__dict__)
     model_config = ModelConfig(**args.__dict__)
