@@ -57,21 +57,6 @@ class TextDataset(Dataset):
 
         # (SEQ_LEN,)
         decoder_input = torch.concat([
-            # (1,)
-            torch.tensor([self.bos_token.item()], dtype=torch.int64),
-
-            # (len(token_ids),)
-            torch.tensor(token_ids, dtype=torch.int64),
-
-            # (1,)
-            torch.tensor([self.eos_token.item()], dtype=torch.int64),
-
-            # (padding,)
-            torch.tensor([self.pad_token.item()] * (padding - 1), dtype=torch.int64)
-        ])[:self.tokenizer.max_len]
-
-        # (SEQ_LEN,)
-        label = torch.concat([
             # (len(token_ids),)
             torch.tensor(token_ids, dtype=torch.int64),
 
@@ -80,6 +65,18 @@ class TextDataset(Dataset):
 
             # (padding,)
             torch.tensor([self.pad_token.item()] * padding, dtype=torch.int64)
+        ])[:self.tokenizer.max_len]
+
+        # (SEQ_LEN,)
+        label = torch.concat([
+            # (len(token_ids) - 1,)
+            torch.tensor(token_ids[1:], dtype=torch.int64),
+
+            # (1,)
+            torch.tensor([self.eos_token.item()], dtype=torch.int64),
+
+            # (padding,)
+            torch.tensor([self.pad_token.item()] * (padding + 1), dtype=torch.int64)
         ])[:decoder_input.size(0)]
 
         return {

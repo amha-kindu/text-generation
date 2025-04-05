@@ -119,12 +119,13 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
     training_loss = 0
     validation_loss = 0
     if state:
-        initial_epoch = state["epoch"] + 1
-        global_step = state["global_step"]
-        training_loss = state["training_loss"]
-        validation_loss = state["validation_loss"]
-        early_stopping.best_loss = state["best_val_loss"]
-        optimizer.load_state_dict(state["optimizer_state_dict"])
+        training_state = state["training_state"]
+        initial_epoch = training_state["epoch"] + 1
+        global_step = training_state["global_step"]
+        training_loss = training_state["training_loss"]
+        validation_loss = training_state["validation_loss"]
+        early_stopping.best_loss = training_state["best_val_loss"]
+        optimizer.load_state_dict(training_state["optimizer_state"])
 
     loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(DEVICE)
 
@@ -140,7 +141,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
         if is_distributed:
             sampler.set_epoch(epoch)
         
-        batch_iterator = tqdm(batch_iterator, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch}", disable = GLOBAL_RANK != COORDINATOR_RANK)
+        batch_iterator = tqdm(batch_iterator, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch+1}/{config.epochs}", disable = GLOBAL_RANK != COORDINATOR_RANK)
         for batch in batch_iterator:
             model.train() 
                  
@@ -225,17 +226,18 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
 
         if GLOBAL_RANK == COORDINATOR_RANK:
             torch.save({
-                "epoch": epoch,
-                "batch_size": config.batch_size,
-                "initial_learning_rate": config.init_lr,
-                "model_state_dict": model.module.state_dict() if is_distributed else model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "global_step": global_step,
-                "training_loss": training_loss,
-                "best_val_loss": early_stopping.best_loss,
-                "validation_loss": validation_loss,
-                "model_config": model.module.config if is_distributed else model.config
-            }, os.path.join(WEIGHTS_DIRECTORY, f"{config.checkpoint}.pt"))
+                "weights": model.module.state_dict() if is_distributed else model.state_dict(),
+                "model_config": model.module.config if is_distributed else model.config,
+                "training_state": {
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "training_loss": training_loss,
+                    "validation_loss": validation_loss,
+                    "best_val_loss": early_stopping.best_loss,
+                    "optimizer_state": optimizer.state_dict(),
+                },
+                "training_config": config
+            }, os.path.join(config.checkpoint))
 
     if is_distributed:
         dist.barrier()
@@ -260,7 +262,7 @@ if __name__ == "__main__":
     parser.add_argument("--dropout", type=float, default=DEFAULT_MODEL_CONFIG.dropout, help="Dropout probability")
     parser.add_argument("--ff-dim", type=int, default=DEFAULT_MODEL_CONFIG.ff_dim, help="Dimensionality of the feed forward layer")
     parser.add_argument("--dist-backend", type=str, default="nccl", help="Distributed backend")
-    parser.add_argument("--load-checkpoint", type=str, default="", help="File path to load saved weights")
+    parser.add_argument("--resume", default=False, action="store_true", help="Resume training from checkpoint")
     parser.add_argument("--checkpoint", type=str, default=DEFAULT_TRAINING_CONFIG.checkpoint, help="Filename for the model checkpoint")
     parser.add_argument("--validation-samples", type=int, default=DEFAULT_TRAINING_CONFIG.validation_samples, help="Number of samples to use for a single validation run")
 
@@ -272,14 +274,25 @@ if __name__ == "__main__":
 
         dist.init_process_group(backend=args.dist_backend)
 
-    if args.load_checkpoint:
-        args.checkpoint = args.load_checkpoint.split(".pt")[0]
-
     assert args.embed_dim % args.heads == 0, "embed_dim must be divisible by heads"
 
     training_config = TrainingConfig(**args.__dict__)
     model_config = ModelConfig(**args.__dict__)
 
+    state, weights = {}, {}
+    if args.resume and args.checkpoint:
+        if not os.path.exists(args.checkpoint):
+            raise FileNotFoundError(f"File {args.checkpoint} does not exist")
+
+        LOGGER.info(f"Preloading model weights from '{args.checkpoint}'...")
+        state: dict = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
+        weights = state["weights"]
+        model_config: ModelConfig = state["model_config"]
+        training_config: TrainingConfig = state["training_config"]
+        if state["training_state"]["epoch"] >= training_config.epochs:
+            training_config.epochs *= 2
+        state.pop("weights")
+        
     os.makedirs(WEIGHTS_DIRECTORY, exist_ok=True)
     tokenizer = SentencePieceProcessor(max_len=model_config.seq_len)
     tokenizer.LoadFromFile(
@@ -289,16 +302,6 @@ if __name__ == "__main__":
     train_dataset = TextDataset(training_config.training_data, tokenizer)
     val_dataset = TextDataset(training_config.validation_data, tokenizer)
     test_dataset = TextDataset(training_config.testing_data, tokenizer)
-
-    state, weights = {}, {}
-    if args.load_checkpoint:
-        if not os.path.exists(args.load_checkpoint):
-            raise FileNotFoundError(f"File {args.load_checkpoint} does not exist")
-        
-        LOGGER.info(f"Preloading model weights {args.load_checkpoint}...")
-        state: dict = torch.load(args.load_checkpoint, map_location=DEVICE)
-        weights = state["model_state_dict"]
-        state.pop("model_state_dict")
 
     model = GPTmodel.build(model_config, weights).to(DEVICE)
     

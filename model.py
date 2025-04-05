@@ -86,7 +86,7 @@ class MultiHeadAttentionBlock(nn.Module):
             with torch.autocast(DEVICE.type, enabled=False):
                 if MIXED_PRECISION_ENABLED:
                     attention_scores = attention_scores.to(torch.float32)
-                attention_scores.masked_fill_(mask == False, -1e09)
+                attention_scores.masked_fill_(mask == False, -1e04)
 
                 # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
                 attention_scores = torch.softmax(
@@ -212,7 +212,7 @@ class GPTmodel(nn.Module):
     @staticmethod
     def build(
         params: ModelConfig,
-        state: dict = {}
+        weights: dict = {}
     ):
         model = GPTmodel(
             n_blocks=params.n_blocks,
@@ -224,11 +224,13 @@ class GPTmodel(nn.Module):
             seq_len=params.seq_len
         )
 
-        if state:
-            model.load_state_dict(state)
+        if weights:
+            model.load_state_dict(weights)
         else:
             for p in model.parameters():
                 if p.dim() > 1:
                     nn.init.xavier_uniform_(p)
+                else:
+                    nn.init.zeros_(p)
 
         return model

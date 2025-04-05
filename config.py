@@ -1,10 +1,34 @@
-import os, logging
+import os, sys, logging
 import torch, random, numpy
 
-random.seed(3000)
-torch.manual_seed(3000)
-numpy.random.seed(3000)
+random.seed(4321)
+torch.manual_seed(4321)
+numpy.random.seed(4321)
 
+class PartialLineHandler(logging.StreamHandler):
+    def emit(self, record):
+        # Determine whether this record is 'partial'
+        partial = getattr(record, 'partial', False)
+
+        try:
+            msg = self.format(record)
+            if partial:
+                # Write the message without a newline
+                self.stream.write(msg)
+            else:
+                # Normal behavior: newline at the end
+                self.stream.write(msg + "\n")
+            self.flush()
+        except Exception:
+            self.handleError(record)
+
+class PartialFormatter(logging.Formatter):
+    def format(self, record):
+        if getattr(record, 'partial', False):
+            return record.getMessage()
+        else:
+            return super().format(record)
+        
 COORDINATOR_RANK = 0
 GLOBAL_RANK = int(os.getenv("RANK", "0"))
 LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
@@ -21,7 +45,13 @@ if torch.cuda.is_available():
     torch.cuda.set_device(DEVICE)
     MIXED_PRECISION_ENABLED = torch.amp.autocast_mode.is_autocast_available(DEVICE.type)
 
-logging.basicConfig(level=logging.INFO, format="\033[95m%(asctime)s\033[0m - \033[94m%(levelname)s\033[0m - \033[96m%(name)s\033[0m - \033[93m%(message)s\033[0m")
+LOGGER.setLevel(logging.INFO)
+stream_handler = PartialLineHandler(sys.stdout)
+stream_handler.setFormatter(PartialFormatter(
+    fmt="\033[95m%(asctime)s\033[0m - \033[94m%(levelname)s\033[0m - \033[96m%(name)s\033[0m - \033[93m%(message)s\033[0m"
+))
+LOGGER.addHandler(stream_handler)
+
 
 class Config:
     def to_dict(self):
