@@ -1,5 +1,5 @@
 import os
-import ijson
+import json
 import argparse
 from config import *
 import sentencepiece as spm
@@ -19,12 +19,18 @@ class SentenceIterator(Iterator):
     
     def __gen__(self) -> Generator:
         with open(self.file_paths[self.current_file], 'r', encoding='utf-8') as f:
-            for sentence in ijson.items(f, "item"):
-                preprocessed_sentence = self.preprocessor.execute(sentence)
-                if preprocessed_sentence:
-                    yield preprocessed_sentence
+            for line in f:
+                try:
+                    # Parse each line as a separate JSON object
+                    sentence = json.loads(line.strip())
+                    preprocessed_sentence = self.preprocessor.execute(sentence)
+                    if preprocessed_sentence:
+                        yield preprocessed_sentence
+                except json.JSONDecodeError as e:
+                    print(f"Error decoding JSON line: {e}")
+                    continue
+            
             self.current_file += 1
-        yield None
 
     def __next__(self):
         item = next(self.generator)

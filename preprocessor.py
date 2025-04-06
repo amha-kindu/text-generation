@@ -69,6 +69,9 @@ class AmharicPreprocessor(PreprocessingPipeline):
         ]
     
     def execute(self, text: str) -> str:
+        if not text:
+            return text
+
         # Remove leading and trailing spaces
         text = text.strip()
 

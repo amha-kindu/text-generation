@@ -6,13 +6,13 @@ import torch.nn as nn
 from tqdm import tqdm
 from model import GPTmodel
 from datetime import datetime
-from dataset import TextDataset
 import torch.distributed as dist
 from tokenizer import SentencePieceProcessor
 from torch.utils.tensorboard import SummaryWriter
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
+from dataset import StreamingTextDataset, TextDataset, IDataset
 
 
 class EarlyStopping:
@@ -34,7 +34,7 @@ class EarlyStopping:
 
 
 @torch.no_grad()
-def test(config: TrainingConfig, model: GPTmodel, test_dataset: TextDataset, is_distributed: bool=False):
+def test(config: TrainingConfig, model: GPTmodel, test_dataset: IDataset, is_distributed: bool=False):
     model.eval()
 
     loss_func = nn.CrossEntropyLoss(ignore_index=test_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(DEVICE)
@@ -101,7 +101,7 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func: nn.Cros
     return val_loss / len(val_batch_iterator)
 
 
-def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, val_dataset: TextDataset, is_distributed: bool = False, state: dict = {}) -> None:
+def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_dataset: IDataset, is_distributed: bool = False, state: dict = {}) -> None:
     writer = SummaryWriter(config.tb_log_dir)
     writer.add_graph(model, input_to_model=torch.randint(0, 100, (1, model.config.seq_len)).to(DEVICE))
 
@@ -129,20 +129,19 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
 
     loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(DEVICE)
 
-    sampler = DistributedSampler(train_dataset, num_replicas=dist.get_world_size(), rank=LOCAL_RANK, shuffle=True) if is_distributed else None
-    batch_iterator = train_dataset.batch_iterator(config.batch_size, sampler=sampler)
+    batch_iterator = train_dataset.batch_iterator(config.batch_size)
 
     val_sampler = RandomSampler(val_dataset, replacement=True, num_samples=config.validation_samples)
     val_batch_iterator = val_dataset.batch_iterator(config.batch_size, sampler=val_sampler)
 
-    avg_train_loss = training_loss / (global_step + 1)
-    avg_val_loss = validation_loss / (global_step // 200 + 1)
+    total_batches = None
     for epoch in range(initial_epoch, config.epochs):
-        if is_distributed:
-            sampler.set_epoch(epoch)
-        
-        batch_iterator = tqdm(batch_iterator, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch+1}/{config.epochs}", disable = GLOBAL_RANK != COORDINATOR_RANK)
+        batch_iterator = tqdm(batch_iterator, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch+1}/{config.epochs}", disable = GLOBAL_RANK != COORDINATOR_RANK, total=total_batches)
         for batch in batch_iterator:
+            if epoch == 0:
+                total_batches = 0 if total_batches is None else total_batches
+                total_batches += 1
+            
             model.train() 
                  
             # (N_BATCHES, SEQ_LEN)
@@ -169,6 +168,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
             
             training_loss += batch_loss.item()
             avg_train_loss = training_loss / (global_step + 1)
+            avg_val_loss = validation_loss / (global_step // 200 + 1)
 
             if GLOBAL_RANK == COORDINATOR_RANK:
                 if global_step % 200 == 0:
@@ -191,10 +191,10 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: TextDataset, v
                 )
                 writer.flush()
 
-            batch_iterator.set_postfix({
-                "train_loss": f"{avg_train_loss:6.3f}", 
-                "val_loss": f"{avg_val_loss:6.3f}"
-            })
+                batch_iterator.set_postfix({
+                    "train_loss": f"{avg_train_loss:6.3f}", 
+                    "val_loss": f"{avg_val_loss:6.3f}"
+                })
 
             if MIXED_PRECISION_ENABLED:
                 scaler.scale(batch_loss).backward()
@@ -298,10 +298,20 @@ if __name__ == "__main__":
     tokenizer.LoadFromFile(
         os.path.join(WORKING_DIR, os.path.join("tokenizers", f"amharic-bpe-tokenizer-{model_config.vocab_size // 1000}k.model"))
     )
+       
+    if os.path.getsize(training_config.training_data) > 200 * 1024 * 1024:
+        LOGGER.info(f"File '{os.path.basename(training_config.training_data)}' too large! streaming...")
+        train_dataset = StreamingTextDataset(training_config.training_data, tokenizer, dist.get_world_size(), LOCAL_RANK)
+    else:
+        train_dataset = TextDataset(training_config.training_data, tokenizer)
+    
+    if os.path.getsize(training_config.testing_data) > 200 * 1024 * 1024:
+        LOGGER.info(f"File '{os.path.basename(training_config.testing_data)}' too large! streaming...")
+        test_dataset = StreamingTextDataset(training_config.testing_data, tokenizer, dist.get_world_size(), LOCAL_RANK)
+    else:
+        test_dataset = TextDataset(training_config.testing_data, tokenizer)
 
-    train_dataset = TextDataset(training_config.training_data, tokenizer)
     val_dataset = TextDataset(training_config.validation_data, tokenizer)
-    test_dataset = TextDataset(training_config.testing_data, tokenizer)
 
     model = GPTmodel.build(model_config, weights).to(DEVICE)
     

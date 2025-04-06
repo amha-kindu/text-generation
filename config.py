@@ -86,9 +86,18 @@ class TrainingConfig(Config):
         self.tb_log_dir: str = kwargs.get("tb_log_dir", "logs")
         self.checkpoint: str = kwargs.get("checkpoint", "amharic-gpt")
         self.validation_samples: int = kwargs.get("validation_samples", 20)
-        self.training_data: str = kwargs.get("training_data", os.path.join(WORKING_DIR, "data", "train_chunk_size_256.json"))
-        self.validation_data: str = kwargs.get("validation_data", os.path.join(WORKING_DIR, "data", "validate_chunk_size_256.json"))
-        self.testing_data: str = kwargs.get("testing_data", os.path.join(WORKING_DIR, "data", "test_chunk_size_256.json"))
+        self.training_data: str = kwargs.get("training_data", os.path.join(WORKING_DIR, "pretraining-corpus", "train.jsonl"))
+        self.validation_data: str = kwargs.get("validation_data", os.path.join(WORKING_DIR, "pretraining-corpus", "val.jsonl"))
+        self.testing_data: str = kwargs.get("testing_data", os.path.join(WORKING_DIR, "pretraining-corpus", "test.jsonl"))
+        
+        if not os.path.isfile(self.training_data):
+            raise FileNotFoundError(f"File '{self.testing_data}' does not exist")
+
+        if not os.path.isfile(self.validation_data):
+            raise FileNotFoundError(f"File '{self.validation_data}' does not exist")
+
+        if not os.path.isfile(self.testing_data):
+            raise FileNotFoundError(f"File '{self.testing_data}' does not exist")
 
 DEFAULT_TRAINING_CONFIG = TrainingConfig()
 DEFAULT_MODEL_CONFIG = ModelConfig()

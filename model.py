@@ -82,16 +82,15 @@ class MultiHeadAttentionBlock(nn.Module):
         attention_scores = (query @ key.transpose(2, 3)) / math.sqrt(self.d_head)
         
         if mask is not None:
-            # Disable mixed-precision if enabled
-            with torch.autocast(DEVICE.type, enabled=False):
-                if MIXED_PRECISION_ENABLED:
-                    attention_scores = attention_scores.to(torch.float32)
-                attention_scores.masked_fill_(mask == False, -1e04)
+            if MIXED_PRECISION_ENABLED:
+                attention_scores = attention_scores.to(torch.float32)
+                
+            attention_scores.masked_fill_(mask == False, -1e09)
 
-                # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
-                attention_scores = torch.softmax(
-                    attention_scores, dim=-1
-                )
+            # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
+            attention_scores = torch.softmax(
+                attention_scores, dim=-1
+            )
 
             if MIXED_PRECISION_ENABLED:
                 attention_scores = attention_scores.to(torch.float16)
@@ -230,7 +229,5 @@ class GPTmodel(nn.Module):
             for p in model.parameters():
                 if p.dim() > 1:
                     nn.init.xavier_uniform_(p)
-                else:
-                    nn.init.zeros_(p)
 
         return model

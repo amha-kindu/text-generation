@@ -3,8 +3,9 @@ import torch
 import argparse
 import traceback
 from config import *
-from dataset import TextDataset
 from model import GPTmodel
+from typing import Iterator
+from dataset import TextDataset
 from preprocessor import AmharicPreprocessor
 from tokenizer import SentencePieceProcessor
 
@@ -23,7 +24,7 @@ class GptInferenceEngine:
         self.model.eval()
 
     @torch.no_grad()
-    def complete(self, text: str, max_len: int) -> str:
+    def complete(self, text: str, max_len: int) -> Iterator[int]:
         text = self.preprocessor.execute(text)
         token_ids = self.tokenizer.Encode(text, out_type=int)
 
@@ -73,7 +74,7 @@ if __name__ == '__main__':
 
     model_config: ModelConfig = checkpoint["model_config"]
 
-    model = GPTmodel.build(model_config, checkpoint["model_state_dict"]).to(DEVICE)
+    model = GPTmodel.build(model_config, checkpoint["weights"]).to(DEVICE)
 
     model.eval()
     total_params = sum(p.numel() for p in model.parameters())

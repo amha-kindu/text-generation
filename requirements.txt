@@ -1,7 +1,7 @@
-ijson==3.3.0
 tensorboard==2.18.0
 sentencepiece==0.2.0
 torch==2.4.1
 torch-tb-profiler==0.4.3
-tqdm==4.66.1
+tqdm==4.66.3
 typing_extensions==4.9.0
+datasets==3.5.0
