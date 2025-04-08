@@ -168,7 +168,6 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
             
             training_loss += batch_loss.item()
             avg_train_loss = training_loss / (global_step + 1)
-            avg_val_loss = validation_loss / (global_step // 200 + 1)
 
             if GLOBAL_RANK == COORDINATOR_RANK:
                 if global_step % 200 == 0:
@@ -214,17 +213,17 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
 
             global_step += 1
 
-        stop_training = early_stopping(avg_val_loss)
-
-        stop_signal[0] = int(stop_training)
-        if is_distributed:
-            dist.broadcast(stop_signal, src=COORDINATOR_RANK)
-        
-        if stop_signal.item() > 0:
-            LOGGER.info(f"Early stopping triggered at epoch {epoch+1} with avg val loss {avg_val_loss}")
-            break
-
         if GLOBAL_RANK == COORDINATOR_RANK:
+            stop_training = early_stopping(avg_val_loss)
+
+            stop_signal[0] = int(stop_training)
+            if is_distributed:
+                dist.broadcast(stop_signal, src=COORDINATOR_RANK)
+                
+            if stop_signal.item() > 0:
+                LOGGER.info(f"Early stopping triggered at epoch {epoch+1}; avg val loss {early_stopping.best_loss:.4f} did not decrease significantly for {early_stopping.patience} consecutive epochs")
+                break
+            
             torch.save({
                 "weights": model.module.state_dict() if is_distributed else model.state_dict(),
                 "model_config": model.module.config if is_distributed else model.config,
@@ -267,12 +266,14 @@ if __name__ == "__main__":
     parser.add_argument("--validation-samples", type=int, default=DEFAULT_TRAINING_CONFIG.validation_samples, help="Number of samples to use for a single validation run")
 
     args = parser.parse_args()
-
+    
+    world_size = 1
     if args.is_distributed:
         assert torch.cuda.device_count() > 1, "Must have more than one CUDA supporting GPUs to initiate distributed training"
         assert args.dist_backend in ["nccl", "gloo" "mpi", "ucc"], "Distributed backend must be one of the following: nccl, gloo, mpi or ucc"
 
         dist.init_process_group(backend=args.dist_backend)
+        world_size = dist.get_world_size()
 
     assert args.embed_dim % args.heads == 0, "embed_dim must be divisible by heads"
 
@@ -301,13 +302,13 @@ if __name__ == "__main__":
        
     if os.path.getsize(training_config.training_data) > 200 * 1024 * 1024:
         LOGGER.info(f"File '{os.path.basename(training_config.training_data)}' too large! streaming...")
-        train_dataset = StreamingTextDataset(training_config.training_data, tokenizer, dist.get_world_size(), LOCAL_RANK)
+        train_dataset = StreamingTextDataset(training_config.training_data, tokenizer, world_size, LOCAL_RANK)
     else:
         train_dataset = TextDataset(training_config.training_data, tokenizer)
     
     if os.path.getsize(training_config.testing_data) > 200 * 1024 * 1024:
         LOGGER.info(f"File '{os.path.basename(training_config.testing_data)}' too large! streaming...")
-        test_dataset = StreamingTextDataset(training_config.testing_data, tokenizer, dist.get_world_size(), LOCAL_RANK)
+        test_dataset = StreamingTextDataset(training_config.testing_data, tokenizer, world_size, LOCAL_RANK)
     else:
         test_dataset = TextDataset(training_config.testing_data, tokenizer)
 
