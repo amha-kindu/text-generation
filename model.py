@@ -46,7 +46,7 @@ class PositionEncoder(nn.Module):
     # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.dropout(x + self.position_encodings.requires_grad_(False))
+        return x + self.position_encodings.requires_grad_(False)
 
 
 class MultiHeadAttentionBlock(nn.Module):
@@ -136,7 +136,7 @@ class AddAndNorm(nn.Module):
     # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM), y -> (N_BATCHES, SEQ_LEN, EMBED_DIM)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
     def forward(self, x: torch.Tensor, y: torch.Tensor):
-        return x + self.dropout(self.layer_norm(y))
+        return self.layer_norm(x + self.dropout(y))
 
 class DecoderBlock(nn.Module):
     def __init__(self, embed_dim: int, ff_dim: int, dropout: float, heads: int):

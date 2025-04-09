@@ -174,7 +174,7 @@ class StreamingTextDataset(IStreamDataset):
                     "decoder_input": input,
                     
                     # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
-                    "decoder_mask": (target != self.pad_token).unsqueeze(0).int() & self.lookback_mask(self.max_len),
+                    "decoder_mask": (input != self.pad_token).unsqueeze(0).int() & self.lookback_mask(self.max_len),
                     
                     # (SEQ_LEN,)
                     "label": target
