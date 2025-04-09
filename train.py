@@ -1,4 +1,6 @@
 import os
+import time
+import math
 import torch
 import argparse
 from config import *
@@ -114,6 +116,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
     early_stopping = EarlyStopping(patience=3, min_delta=0.01)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.init_lr, weight_decay=1e-2)
     
+    alpha = 0.9
     initial_epoch = 0
     global_step = 0
     training_loss = 0
@@ -166,55 +169,87 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                     label.view(-1)
                 )
             
-            training_loss += batch_loss.item()
-            avg_train_loss = training_loss / (global_step + 1)
+            if global_step == 0:
+                # Initialize
+                training_loss = batch_loss.item()
+            else:
+                # Update training_loss to calculate its exponential moving average
+                training_loss = alpha * training_loss + (1 - alpha) * batch_loss.item()
+            train_ema = training_loss / (global_step + 1)
 
             if GLOBAL_RANK == COORDINATOR_RANK:
-                if global_step % 200 == 0:
-                    validation_loss += validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
-                    avg_val_loss = validation_loss / (global_step // 200 + 1)
+                # Visualize learning rate evolution
+                lr = optimizer.param_groups[0]['lr']
+                writer.add_scalar("Learning_Rate", lr, global_step)
+
+                # Histogram of Model Parameters
+                for name, param in model.named_parameters():
+                    if "weight" in name:
+                        writer.add_histogram(f"Weights/{name}", param.cpu().detach(), global_step)
+
+                if global_step % 100 == 0:
+                    val_loss = validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
+                    if global_step == 0:
+                        validation_loss = val_loss
+                    else:
+                        # Update validation_loss to calculate its exponential moving average
+                        validation_loss = alpha * validation_loss + (1 - alpha) * val_loss
+                    val_ema = validation_loss / (global_step // 100 + 1)
                     
                     writer.add_scalars(
-                        "Loss", 
+                        "Loss",
                         { 
-                            "Validation": avg_val_loss
+                            "Validation": val_ema
                         },
                         global_step
                     )
                 writer.add_scalars(
                     "Loss",
                     {
-                        "Training": avg_train_loss
+                        "Training": train_ema
                     },
                     global_step
                 )
                 writer.flush()
 
                 batch_iterator.set_postfix({
-                    "train_loss": f"{avg_train_loss:6.3f}", 
-                    "val_loss": f"{avg_val_loss:6.3f}"
+                    "train_loss": f"{train_ema:6.3f}", 
+                    "val_loss": f"{val_ema:6.3f}"
                 })
 
             if MIXED_PRECISION_ENABLED:
                 scaler.scale(batch_loss).backward()
-
+                
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
+                gradients = [p.grad for p in model.parameters() if p.grad is not None]
+                grad_vector = torch.cat([g.view(-1) for g in gradients])
+                grad_norm_pre_clip = torch.linalg.vector_norm(grad_vector).item()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                grad_vector_post = torch.cat([g.view(-1) for g in gradients])
+                grad_norm_post_clip = torch.linalg.vector_norm(grad_vector_post).item()
+                
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 batch_loss.backward()
                 
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)                
+                gradients = [p.grad for p in model.parameters() if p.grad is not None]
+                grad_vector = torch.cat([g.view(-1) for g in gradients])
+                grad_norm_pre_clip = torch.linalg.vector_norm(grad_vector).item()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                grad_vector_post = torch.cat([g.view(-1) for g in gradients])
+                grad_norm_post_clip = torch.linalg.vector_norm(grad_vector_post).item()
                 optimizer.step()
+
+            writer.add_scalar("Gradients/Norm_Pre_Clip", grad_norm_pre_clip, global_step)
+            writer.add_scalar("Gradients/Norm_Post_Clip", grad_norm_post_clip, global_step)
 
             optimizer.zero_grad()
 
             global_step += 1
 
         if GLOBAL_RANK == COORDINATOR_RANK:
-            stop_training = early_stopping(avg_val_loss)
+            stop_training = early_stopping(val_ema)
 
             stop_signal[0] = int(stop_training)
             if is_distributed:

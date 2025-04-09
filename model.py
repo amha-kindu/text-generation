@@ -136,7 +136,7 @@ class AddAndNorm(nn.Module):
     # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM), y -> (N_BATCHES, SEQ_LEN, EMBED_DIM)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
     def forward(self, x: torch.Tensor, y: torch.Tensor):
-        return self.layer_norm(x + self.dropout(y))
+        return x + self.dropout(self.layer_norm(y))
 
 class DecoderBlock(nn.Module):
     def __init__(self, embed_dim: int, ff_dim: int, dropout: float, heads: int):
