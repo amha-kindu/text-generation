@@ -11,12 +11,12 @@ from tokenizer import SentencePieceProcessor
 
 
 class GptInferenceEngine:
-
-    def __init__(self, model: GPTmodel, tokenizer: SentencePieceProcessor, top_k: int= 1, nucleus_threshold=10) -> None:
+    def __init__(self, model: GPTmodel, tokenizer: SentencePieceProcessor, top_k: int = 50, top_p: float = 0.9, temperature: float = 1.0) -> None:
         self.model = model
-        self.top_k = top_k
         self.tokenizer = tokenizer
-        self.nucleus_threshold = nucleus_threshold
+        self.top_k = top_k
+        self.top_p = top_p
+        self.temperature = temperature
         self.pad_id = self.tokenizer.pad_id()
         self.eos_id = self.tokenizer.eos_id()
         self.preprocessor = AmharicPreprocessor()
@@ -24,40 +24,62 @@ class GptInferenceEngine:
         self.model.eval()
 
     @torch.no_grad()
-    def complete(self, text: str, max_len: int) -> Iterator[int]:
+    def complete(self, text: str) -> Iterator[int]:
         text = self.preprocessor.execute(text)
-        token_ids = self.tokenizer.Encode(text, out_type=int)
+        token_ids: list[int] = self.tokenizer.Encode(text, out_type=int)
 
-        # (len(token_ids), )
-        decoder_input = torch.tensor(token_ids + [self.pad_id] * (max_len - len(token_ids)), dtype=torch.int64).to(DEVICE)
-        
-        # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
-        decoder_mask = (decoder_input != self.pad_id).unsqueeze(0).int().to(DEVICE) & TextDataset.lookback_mask(max_len).to(DEVICE)
-        
-        count = len(token_ids)
         predicted_token = None
-        while token_ids and count + 1 < self.tokenizer.max_len and predicted_token != self.eos_id:
+        while token_ids and len(token_ids) < self.tokenizer.max_len and predicted_token != self.eos_id:
+            decoder_input = torch.tensor(
+                token_ids,
+                dtype=torch.int64
+            ).to(DEVICE).unsqueeze(0)
+                        
+            decoder_mask = TextDataset.lookback_mask(len(token_ids)).to(DEVICE)
+            
             with torch.autocast(device_type=DEVICE.type, enabled=MIXED_PRECISION_ENABLED):
                 # (1, SEQ_LEN, VOCAB_SIZE)
                 logits = self.model(decoder_input, decoder_mask)
 
             # (1, VOCAB_SIZE)
-            next_token_logits = logits[:, -1]
+            # Take logits for the last position and apply temperature scaling
+            next_token_logits = logits[:, -1, :] / self.temperature
 
-            # Evaluate the probability distribution across the VOCAB_SIZE
-            # dimension using softmax - (1, VOCAB_SIZE)
-            probab_distribution = torch.softmax(next_token_logits, dim=1)
+            # Apply softmax to get probabilities
+            prob_dist = torch.softmax(next_token_logits, dim=-1)
 
-            # Randomly pick one of the top 5 tokens
-            top_k_probs, top_k_indices = torch.topk(probab_distribution, self.top_k, dim=1)
-            chosen_index = torch.multinomial(top_k_probs, 1)
-            predicted_token = top_k_indices[0, chosen_index]
+            # Filter the top k tokens based on their probabilities
+            top_k = min(self.top_k, prob_dist.size(-1))
+            top_k_probs, top_k_indices = torch.topk(prob_dist, top_k, dim=-1)
 
-            # Add the predicted token to the decoder input for the subsequent iterations
-            decoder_input[count] = predicted_token.item()
-            
-            count += 1
-            yield predicted_token.item()
+            # Sort top_k by descending prob, do top-p within that subset
+            sorted_probs, sorted_indices = torch.sort(top_k_probs, descending=True, dim=-1)
+            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+            mask = (cumulative_probs <= self.top_p)
+
+            # Ensure at least one token is kept: only set the *highest-prob* token true
+            mask[0, 0] = True
+
+            filtered_probs = sorted_probs[mask]
+            filtered_indices = sorted_indices[mask]
+
+            # If top-p filtering zeroed everything (very rare), revert to top_k
+            if filtered_probs.numel() == 0:
+                filtered_probs = top_k_probs[0]
+                filtered_indices = top_k_indices[0]
+            else:
+                # Otherwise, map sorted_indices back to the original top_k_indices:
+                # sorted_indices are indices *within* top_k => we find actual token IDs:
+                filtered_indices = top_k_indices[0, filtered_indices]
+
+            # Re-normalize probabilities and sample
+            filtered_probs = filtered_probs / filtered_probs.sum()
+            chosen_idx = torch.multinomial(filtered_probs, 1).item()
+            predicted_token = filtered_indices[chosen_idx].item()
+
+            token_ids.append(predicted_token)
+
+            yield predicted_token
 
 
 if __name__ == '__main__':
@@ -88,7 +110,7 @@ if __name__ == '__main__':
     tokenizer.LoadFromFile(
         f"{WORKING_DIR}/tokenizers/amharic-bpe-tokenizer-{model_config.vocab_size // 1000}k.model"
     )
-    inference_engine = GptInferenceEngine(model, tokenizer, top_k=5)
+    inference_engine = GptInferenceEngine(model, tokenizer, top_k=50, top_p=0.9, temperature=1)
 
     while True:
         user_input = input("Input: ")
@@ -98,7 +120,7 @@ if __name__ == '__main__':
 
         try:
             LOGGER.info(f"Response: {user_input}", extra={"partial": True})
-            for token in inference_engine.complete(user_input, model_config.seq_len):
+            for token in inference_engine.complete(user_input):
                 LOGGER.info(tokenizer.DecodeIds([token]), extra={"partial": True})
                 time.sleep(0.05)
             print()

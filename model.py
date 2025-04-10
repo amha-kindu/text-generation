@@ -46,7 +46,7 @@ class PositionEncoder(nn.Module):
     # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.position_encodings.requires_grad_(False)
+        return x + self.position_encodings[:, :x.shape[1], :].requires_grad_(False)
 
 
 class MultiHeadAttentionBlock(nn.Module):

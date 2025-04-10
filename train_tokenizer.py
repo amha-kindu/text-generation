@@ -18,19 +18,18 @@ class SentenceIterator(Iterator):
         return self
     
     def __gen__(self) -> Generator:
-        with open(self.file_paths[self.current_file], 'r', encoding='utf-8') as f:
-            for line in f:
-                try:
-                    # Parse each line as a separate JSON object
-                    sentence = json.loads(line.strip())
-                    preprocessed_sentence = self.preprocessor.execute(sentence)
-                    if preprocessed_sentence:
-                        yield preprocessed_sentence
-                except json.JSONDecodeError as e:
-                    print(f"Error decoding JSON line: {e}")
-                    continue
-            
-            self.current_file += 1
+        for file_path in self.file_paths:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    try:
+                        # Parse each line as a separate JSON object
+                        sentence = json.loads(line.strip())
+                        preprocessed_sentence = self.preprocessor.execute(sentence)
+                        if preprocessed_sentence:
+                            yield preprocessed_sentence
+                    except json.JSONDecodeError as e:
+                        print(f"Error decoding JSON line: {e}")
+                        continue
 
     def __next__(self):
         item = next(self.generator)
@@ -48,15 +47,17 @@ if __name__ == "__main__":
     args = parser.parse_args()
     config = TrainingConfig(**args.__dict__)
 
-    iterator = SentenceIterator([config.training_data])
-
+    iterator = SentenceIterator([config.training_data, config.testing_data, config.validation_data])    
+    
     spm.SentencePieceTrainer.Train(
         sentence_iterator=iterator,
         model_prefix=os.path.join('tokenizers', f"amharic-bpe-tokenizer-{args.vocab_size // 1000}k"),
         vocab_size=args.vocab_size,
-        character_coverage=0.9995,
+        character_coverage=1.0,
         model_type='bpe',
         unk_id=0, pad_id=1, bos_id=2, eos_id=3,
         unk_piece='[UNK]', pad_piece='[PAD]', bos_piece='[SOS]', eos_piece='[EOS]',
+        split_by_whitespace=False,
+        allow_whitespace_only_pieces=True,
         train_extremely_large_corpus=True
     )

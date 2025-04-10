@@ -175,18 +175,8 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
             else:
                 # Update training_loss to calculate its exponential moving average
                 training_loss = alpha * training_loss + (1 - alpha) * batch_loss.item()
-            train_ema = training_loss / (global_step + 1)
 
             if GLOBAL_RANK == COORDINATOR_RANK:
-                # Visualize learning rate evolution
-                lr = optimizer.param_groups[0]['lr']
-                writer.add_scalar("Learning_Rate", lr, global_step)
-
-                # Histogram of Model Parameters
-                for name, param in model.named_parameters():
-                    if "weight" in name:
-                        writer.add_histogram(f"Weights/{name}", param.cpu().detach(), global_step)
-
                 if global_step % 100 == 0:
                     val_loss = validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
                     if global_step == 0:
@@ -194,39 +184,42 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                     else:
                         # Update validation_loss to calculate its exponential moving average
                         validation_loss = alpha * validation_loss + (1 - alpha) * val_loss
-                    val_ema = validation_loss / (global_step // 100 + 1)
                     
                     writer.add_scalars(
                         "Loss",
                         { 
-                            "Validation": val_ema
+                            "Validation": validation_loss
                         },
                         global_step
                     )
+                    writer.add_scalar('Loss Gap', validation_loss - training_loss, global_step)
                 writer.add_scalars(
                     "Loss",
                     {
-                        "Training": train_ema
+                        "Training": training_loss
                     },
                     global_step
                 )
                 writer.flush()
 
                 batch_iterator.set_postfix({
-                    "train_loss": f"{train_ema:6.3f}", 
-                    "val_loss": f"{val_ema:6.3f}"
+                    "train_loss": f"{training_loss:6.3f}", 
+                    "val_loss": f"{validation_loss:6.3f}"
                 })
 
             if MIXED_PRECISION_ENABLED:
                 scaler.scale(batch_loss).backward()
                 
                 scaler.unscale_(optimizer)
+                
                 gradients = [p.grad for p in model.parameters() if p.grad is not None]
-                grad_vector = torch.cat([g.view(-1) for g in gradients])
-                grad_norm_pre_clip = torch.linalg.vector_norm(grad_vector).item()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-                grad_vector_post = torch.cat([g.view(-1) for g in gradients])
-                grad_norm_post_clip = torch.linalg.vector_norm(grad_vector_post).item()
+                grad_vector_pre_clip = torch.cat([g.view(-1) for g in gradients])
+                grad_norm_pre_clip = torch.linalg.vector_norm(grad_vector_pre_clip).item()
+                
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
+                grad_vector_post_clip = torch.cat([g.view(-1) for g in gradients])
+                grad_norm_post_clip = torch.linalg.vector_norm(grad_vector_post_clip).item()
                 
                 scaler.step(optimizer)
                 scaler.update()
@@ -234,22 +227,24 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                 batch_loss.backward()
                 
                 gradients = [p.grad for p in model.parameters() if p.grad is not None]
-                grad_vector = torch.cat([g.view(-1) for g in gradients])
-                grad_norm_pre_clip = torch.linalg.vector_norm(grad_vector).item()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-                grad_vector_post = torch.cat([g.view(-1) for g in gradients])
-                grad_norm_post_clip = torch.linalg.vector_norm(grad_vector_post).item()
+                grad_vector_pre_clip = torch.cat([g.view(-1) for g in gradients])
+                grad_norm_pre_clip = torch.linalg.vector_norm(grad_vector_pre_clip).item()
+                
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
+                gradients = [p.grad for p in model.parameters() if p.grad is not None]
+                grad_vector_post_clip = torch.cat([g.view(-1) for g in gradients])
+                grad_norm_post_clip = torch.linalg.vector_norm(grad_vector_post_clip).item()
+                
                 optimizer.step()
 
-            writer.add_scalar("Gradients/Norm_Pre_Clip", grad_norm_pre_clip, global_step)
-            writer.add_scalar("Gradients/Norm_Post_Clip", grad_norm_post_clip, global_step)
-
+            writer.add_scalars("Gradient(Norm)", {"PreClip": grad_norm_pre_clip,"PostClip": grad_norm_post_clip}, global_step)
             optimizer.zero_grad()
 
             global_step += 1
 
         if GLOBAL_RANK == COORDINATOR_RANK:
-            stop_training = early_stopping(val_ema)
+            stop_training = early_stopping(validation_loss)
 
             stop_signal[0] = int(stop_training)
             if is_distributed:
