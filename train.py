@@ -1,6 +1,4 @@
 import os
-import time
-import math
 import torch
 import argparse
 from config import *
@@ -218,55 +216,48 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                 
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 
-                grad_vector_post_clip = torch.cat([g.view(-1) for g in gradients])
-                grad_norm_post_clip = torch.linalg.vector_norm(grad_vector_post_clip).item()
-                
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 batch_loss.backward()
                 
                 gradients = [p.grad for p in model.parameters() if p.grad is not None]
-                grad_vector_pre_clip = torch.cat([g.view(-1) for g in gradients])
-                grad_norm_pre_clip = torch.linalg.vector_norm(grad_vector_pre_clip).item()
+                grad_vector = torch.cat([g.view(-1) for g in gradients])
+                grad_norm_pre_clip = torch.linalg.vector_norm(grad_vector).item()
                 
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 
-                gradients = [p.grad for p in model.parameters() if p.grad is not None]
-                grad_vector_post_clip = torch.cat([g.view(-1) for g in gradients])
-                grad_norm_post_clip = torch.linalg.vector_norm(grad_vector_post_clip).item()
-                
                 optimizer.step()
 
-            writer.add_scalars("Gradient(Norm)", {"PreClip": grad_norm_pre_clip,"PostClip": grad_norm_post_clip}, global_step)
+            writer.add_scalar("Gradients(norm)/Pre-Clip", grad_norm_pre_clip, global_step)
             optimizer.zero_grad()
 
-            global_step += 1
+            if global_step and global_step % 22000 == 0 and GLOBAL_RANK == COORDINATOR_RANK:
+                stop_training = early_stopping(validation_loss)
 
-        if GLOBAL_RANK == COORDINATOR_RANK:
-            stop_training = early_stopping(validation_loss)
-
-            stop_signal[0] = int(stop_training)
-            if is_distributed:
-                dist.broadcast(stop_signal, src=COORDINATOR_RANK)
+                stop_signal[0] = int(stop_training)
+                if is_distributed:
+                    dist.broadcast(stop_signal, src=COORDINATOR_RANK)
+                    
+                if stop_signal.item() > 0:
+                    LOGGER.info(f"Early stopping triggered at epoch {epoch+1}; avg val loss {early_stopping.best_loss:.4f} did not decrease significantly for {early_stopping.patience} consecutive epochs")
+                    break
                 
-            if stop_signal.item() > 0:
-                LOGGER.info(f"Early stopping triggered at epoch {epoch+1}; avg val loss {early_stopping.best_loss:.4f} did not decrease significantly for {early_stopping.patience} consecutive epochs")
-                break
+                torch.save({
+                    "weights": model.module.state_dict() if is_distributed else model.state_dict(),
+                    "model_config": model.module.config if is_distributed else model.config,
+                    "training_state": {
+                        "epoch": epoch,
+                        "global_step": global_step,
+                        "training_loss": training_loss,
+                        "validation_loss": validation_loss,
+                        "best_val_loss": early_stopping.best_loss,
+                        "optimizer_state": optimizer.state_dict(),
+                    },
+                    "training_config": config
+                }, os.path.join(config.checkpoint))
             
-            torch.save({
-                "weights": model.module.state_dict() if is_distributed else model.state_dict(),
-                "model_config": model.module.config if is_distributed else model.config,
-                "training_state": {
-                    "epoch": epoch,
-                    "global_step": global_step,
-                    "training_loss": training_loss,
-                    "validation_loss": validation_loss,
-                    "best_val_loss": early_stopping.best_loss,
-                    "optimizer_state": optimizer.state_dict(),
-                },
-                "training_config": config
-            }, os.path.join(config.checkpoint))
+            global_step += 1
 
     if is_distributed:
         dist.barrier()

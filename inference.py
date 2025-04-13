@@ -110,7 +110,7 @@ if __name__ == '__main__':
     tokenizer.LoadFromFile(
         f"{WORKING_DIR}/tokenizers/amharic-bpe-tokenizer-{model_config.vocab_size // 1000}k.model"
     )
-    inference_engine = GptInferenceEngine(model, tokenizer, top_k=50, top_p=0.9, temperature=1)
+    inference_engine = GptInferenceEngine(model, tokenizer, top_k=10, top_p=0.9, temperature=1)
 
     while True:
         user_input = input("Input: ")
@@ -120,9 +120,11 @@ if __name__ == '__main__':
 
         try:
             LOGGER.info(f"Response: {user_input}", extra={"partial": True})
-            for token in inference_engine.complete(user_input):
-                LOGGER.info(tokenizer.DecodeIds([token]), extra={"partial": True})
-                time.sleep(0.05)
+            for token_id in inference_engine.complete(user_input):
+                if token_id != tokenizer.eos_id():
+                    token: str = tokenizer.IdToPiece(token_id)
+                    LOGGER.info(token.replace("▁", " "), extra={"partial": True})
+                    time.sleep(0.05)
             print()
         except Exception as e:
             traceback.print_exc()

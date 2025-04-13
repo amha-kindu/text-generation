@@ -9,9 +9,9 @@ os.makedirs(base_dir, exist_ok=True)
 
 # Dictionary to map splits to their file paths
 split_paths = {
-    "train": os.path.join(base_dir, "train.jsonl"),
-    "test": os.path.join(base_dir, "test.jsonl"),
-    "validation": os.path.join(base_dir, "validation.jsonl")
+    "train": os.path.join(base_dir, "train2.jsonl"),
+    # "test": os.path.join(base_dir, "test2.jsonl"),
+    # "validation": os.path.join(base_dir, "validation.jsonl")
 }
 
 # Target size for the subset (5GB = 5,242,880,000 bytes)
@@ -35,30 +35,30 @@ for split_name, file_path in split_paths.items():
     with open(file_path, "w", encoding="utf-8") as f:
         for example in ds:
             # Assuming the dataset has a 'text' field (adjust key if different)
-            original_text = example.get("text", "")
+            text = example.get("text", "")
             
             # Apply preprocessing
-            processed_text = preprocessor.execute(original_text)
+            text = preprocessor.execute(text)
             
             # Filter based on character length
-            if processed_text and len(processed_text) > min_char_length:
+            if text and len(text) >= min_char_length:
                 # Write the preprocessed string as a JSON line
-                json.dump(processed_text, f, ensure_ascii=False)
+                json.dump(text, f, ensure_ascii=False)
                 f.write("\n")  # Add newline for JSONL format
                 filtered_count += 1
                 
                 # Update total bytes written (size of the JSON string)
-                example_size = len(json.dumps(processed_text, ensure_ascii=False).encode("utf-8")) + 1  # +1 for newline
+                example_size = len(json.dumps(text, ensure_ascii=False).encode("utf-8")) + 1  # +1 for newline
                 total_bytes_written += example_size
                 
                 # Stop when we reach ~5GB
-                if total_bytes_written >= target_size_bytes:
-                    break
+                # if total_bytes_written >= target_size_bytes:
+                #     break
 
             example_count += 1
 
-            # Print feedback every 100,000 samples retrieved
-            if example_count % 100_000 == 0:
+            # Print feedback every 1,000,000 samples retrieved
+            if example_count % 1_000_000 == 0:
                 size_mb = total_bytes_written / (1024 * 1024)
                 print(f"  Processed {example_count:,} samples, Filtered {filtered_count:,} saved, ~{size_mb:.2f} MB")
 

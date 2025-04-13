@@ -57,7 +57,6 @@ if __name__ == "__main__":
         model_type='bpe',
         unk_id=0, pad_id=1, bos_id=2, eos_id=3,
         unk_piece='[UNK]', pad_piece='[PAD]', bos_piece='[SOS]', eos_piece='[EOS]',
-        split_by_whitespace=False,
-        allow_whitespace_only_pieces=True,
+        allow_whitespace_only_pieces= True,
         train_extremely_large_corpus=True
     )
