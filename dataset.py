@@ -40,7 +40,7 @@ class IDataset(Dataset, ABC):
         padding = self.max_len - len(token_ids)
         
         # (SEQ_LEN,)
-        input: torch.Tensor = torch.concat([
+        decoder_input: torch.Tensor = torch.concat([
             # (len(token_ids),)
             torch.tensor(token_ids, dtype=torch.int64),
             
@@ -60,7 +60,7 @@ class IDataset(Dataset, ABC):
             torch.tensor([self.pad_token] * padding, dtype=torch.int64)
         ])[:self.max_len]
         
-        return input, target
+        return decoder_input, target
 
 
 class TextDataset(IDataset):
@@ -101,7 +101,7 @@ class TextDataset(IDataset):
             "decoder_input": decoder_input,
 
             # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
-            "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0).int() & self.lookback_mask(self.max_len),
+            "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
 
             # (SEQ_LEN,)
             "label": target
@@ -167,14 +167,14 @@ class StreamingTextDataset(IStreamDataset):
                 if not token_ids:
                     continue
 
-                input, target = self.datapoint(token_ids)
+                decoder_input, target = self.datapoint(token_ids)
 
                 yield {
                     # (SEQ_LEN,)
-                    "decoder_input": input,
+                    "decoder_input": decoder_input,
                     
-                    # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
-                    "decoder_mask": (input != self.pad_token).unsqueeze(0).int() & self.lookback_mask(self.max_len),
+                    # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN) --> (1, 1, SEQ_LEN, SEQ_LEN)
+                    "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
                     
                     # (SEQ_LEN,)
                     "label": target

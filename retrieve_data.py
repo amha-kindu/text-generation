@@ -9,7 +9,7 @@ os.makedirs(base_dir, exist_ok=True)
 
 # Dictionary to map splits to their file paths
 split_paths = {
-    "train": os.path.join(base_dir, "train2.jsonl"),
+    "train": os.path.join(base_dir, "train.jsonl"),
     # "test": os.path.join(base_dir, "test2.jsonl"),
     # "validation": os.path.join(base_dir, "validation.jsonl")
 }

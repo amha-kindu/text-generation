@@ -1,3 +1,4 @@
+import fcntl
 import os, sys, logging
 import torch, random, numpy
 
@@ -32,6 +33,7 @@ class PartialFormatter(logging.Formatter):
 COORDINATOR_RANK = 0
 GLOBAL_RANK = int(os.getenv("RANK", "0"))
 LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
+WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
 WORKING_DIR = os.path.dirname(os.path.realpath(__file__))
 WEIGHTS_DIRECTORY = os.path.join(WORKING_DIR, "weights")
 
@@ -78,11 +80,46 @@ class ModelConfig(Config):
         self.seq_len: int = kwargs.get("seq_len", 50)
 
 
+def get_line_count(file_path):
+    cache_file_path = f"{file_path}.lc"
+    
+    # Try to read from cache (with shared lock)
+    if os.path.exists(cache_file_path):
+        if GLOBAL_RANK == COORDINATOR_RANK:
+            LOGGER.info("Using cached sample count")
+        with open(cache_file_path, 'r') as f:
+            fcntl.flock(f, fcntl.LOCK_SH)  # Shared lock for reading
+            try:
+                val = f.read()
+                if val:
+                    return int(val)
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+
+    # Compute line count and write to cache (with exclusive lock)
+    with open(cache_file_path, 'w') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)  # Exclusive lock for writing
+        try:
+            # Compute actual line count
+            if GLOBAL_RANK == COORDINATOR_RANK:
+                LOGGER.info("Counting samples in training data...")
+            with open(file_path, 'r') as src_file:
+                count = sum(1 for _ in src_file)
+            
+            # Write to cache
+            with open(cache_file_path, 'w') as cache_f:
+                cache_f.write(str(count))
+            
+            return count
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
 class TrainingConfig(Config):
     def __init__(self, **kwargs):
         self.epochs: int = kwargs.get("epochs", 10)
         self.batch_size: int = kwargs.get("batch_size", 64)
         self.init_lr: float = kwargs.get("init_lr", 2e-04)
+        self.warmup_steps: int = kwargs.get("warmup_steps", 2000)
         self.tb_log_dir: str = kwargs.get("tb_log_dir", "logs")
         self.checkpoint: str = kwargs.get("checkpoint", "amharic-gpt")
         self.validation_samples: int = kwargs.get("validation_samples", 20)
@@ -93,6 +130,15 @@ class TrainingConfig(Config):
         if not os.path.isfile(self.training_data):
             raise FileNotFoundError(f"File '{self.testing_data}' does not exist")
 
+        if kwargs:
+            samples = get_line_count(self.training_data)
+            self.total_steps =  samples // (self.batch_size * WORLD_SIZE)
+            if GLOBAL_RANK == COORDINATOR_RANK:
+                LOGGER.info(f"Total training samples: {samples}")
+                LOGGER.info(f"Identified {WORLD_SIZE} GPUs")
+                LOGGER.info(f"Effective batch size: {self.batch_size * WORLD_SIZE}")
+                LOGGER.info(f"Effective steps(per epoch): {self.total_steps}")
+        
         if not os.path.isfile(self.validation_data):
             raise FileNotFoundError(f"File '{self.validation_data}' does not exist")
 

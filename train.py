@@ -1,4 +1,5 @@
 import os
+import math
 import torch
 import argparse
 from config import *
@@ -107,12 +108,22 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
 
     if is_distributed:
         model = DistributedDataParallel(model, device_ids=[LOCAL_RANK])
+
+    # Learning rate scheduler with warmup and cosine decay
+    def lr_lambda(current_step: int):
+        if current_step < config.warmup_steps:
+            return float(current_step) / float(max(1, config.warmup_steps))
+        return max(
+            0.0,
+            0.5 * (1.0 + math.cos(math.pi * (current_step - config.warmup_steps) / float(config.total_steps - config.warmup_steps)))
+        )
     
     scaler = torch.GradScaler(device=DEVICE.type) if MIXED_PRECISION_ENABLED else None
 
     stop_signal = torch.tensor([0], device=DEVICE)
     early_stopping = EarlyStopping(patience=3, min_delta=0.01)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.init_lr, weight_decay=1e-2)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
     
     alpha = 0.9
     initial_epoch = 0
@@ -127,6 +138,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
         validation_loss = training_state["validation_loss"]
         early_stopping.best_loss = training_state["best_val_loss"]
         optimizer.load_state_dict(training_state["optimizer_state"])
+        scheduler.load_state_dict(training_state["lr_scheduler_state"])
 
     loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(DEVICE)
 
@@ -135,14 +147,9 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
     val_sampler = RandomSampler(val_dataset, replacement=True, num_samples=config.validation_samples)
     val_batch_iterator = val_dataset.batch_iterator(config.batch_size, sampler=val_sampler)
 
-    total_batches = None
     for epoch in range(initial_epoch, config.epochs):
-        batch_iterator = tqdm(batch_iterator, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch+1}/{config.epochs}", disable = GLOBAL_RANK != COORDINATOR_RANK, total=total_batches)
+        batch_iterator = tqdm(batch_iterator, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch+1}/{config.epochs}", disable = GLOBAL_RANK != COORDINATOR_RANK, total=config.total_steps)
         for batch in batch_iterator:
-            if epoch == 0:
-                total_batches = 0 if total_batches is None else total_batches
-                total_batches += 1
-            
             model.train() 
                  
             # (N_BATCHES, SEQ_LEN)
@@ -159,7 +166,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                 logits: torch.Tensor = model(decoder_input, decoder_mask)
 
                 # Compute the cross-entropy loss
-                batch_loss = loss_func.forward(
+                batch_loss = loss_func(
                     # (N_BATCHES, SEQ_LEN, VOCAB_SIZE) --> (N_BATCHES * SEQ_LEN, VOCAB_SIZE)
                     logits.view(-1, train_dataset.tokenizer.vocab_size()),
 
@@ -228,7 +235,10 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 
                 optimizer.step()
+            
+            scheduler.step()
 
+            writer.add_scalar("Learning Rate", scheduler.get_last_lr()[0], global_step)
             writer.add_scalar("Gradients(norm)/Pre-Clip", grad_norm_pre_clip, global_step)
             optimizer.zero_grad()
 
@@ -253,6 +263,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                         "validation_loss": validation_loss,
                         "best_val_loss": early_stopping.best_loss,
                         "optimizer_state": optimizer.state_dict(),
+                        "lr_scheduler_state": scheduler.state_dict()
                     },
                     "training_config": config
                 }, os.path.join(config.checkpoint))
@@ -272,6 +283,7 @@ if __name__ == "__main__":
     parser.add_argument("--testing-data", type=str, default=DEFAULT_TRAINING_CONFIG.testing_data, help="Path to the testing dataset")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_TRAINING_CONFIG.batch_size, help="Batch size used during training")
     parser.add_argument("--init-lr", type=float, default=DEFAULT_TRAINING_CONFIG.init_lr, help="Initial learning rate")
+    parser.add_argument("--warmup-steps", type=int, default=DEFAULT_TRAINING_CONFIG.warmup_steps, help="Number of warmup steps")
     parser.add_argument("--tb-log-dir", type=str, default=DEFAULT_TRAINING_CONFIG.tb_log_dir, help="Initial learning rate")
     parser.add_argument("--epochs", type=int, default=DEFAULT_TRAINING_CONFIG.epochs, help="Number of epochs to train the model")
     parser.add_argument("--seq-len", type=int, default=DEFAULT_MODEL_CONFIG.seq_len, help="Sequence length of the input")
@@ -322,13 +334,15 @@ if __name__ == "__main__":
     )
        
     if os.path.getsize(training_config.training_data) > 200 * 1024 * 1024:
-        LOGGER.info(f"File '{os.path.basename(training_config.training_data)}' too large! streaming...")
+        if GLOBAL_RANK == COORDINATOR_RANK:
+            LOGGER.info(f"File '{os.path.basename(training_config.training_data)}' too large! streaming file...")
         train_dataset = StreamingTextDataset(training_config.training_data, tokenizer, world_size, LOCAL_RANK)
     else:
         train_dataset = TextDataset(training_config.training_data, tokenizer)
     
     if os.path.getsize(training_config.testing_data) > 200 * 1024 * 1024:
-        LOGGER.info(f"File '{os.path.basename(training_config.testing_data)}' too large! streaming...")
+        if GLOBAL_RANK == COORDINATOR_RANK:
+            LOGGER.info(f"File '{os.path.basename(training_config.testing_data)}' too large! streaming file...")
         test_dataset = StreamingTextDataset(training_config.testing_data, tokenizer, world_size, LOCAL_RANK)
     else:
         test_dataset = TextDataset(training_config.testing_data, tokenizer)
