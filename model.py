@@ -66,7 +66,7 @@ class MultiHeadAttentionBlock(nn.Module):
     
     # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
-    def forward(self, key: torch.Tensor, query: torch.Tensor, value: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+    def forward(self, key: torch.Tensor, query: torch.Tensor, value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         # (N_BATCHES, SEQ_LEN, EMBED_DIM) @ (EMBED_DIM, EMBED_DIM) --> (N_BATCHES, SEQ_LEN, EMBED_DIM)
         key: torch.Tensor = self.Wk(key)
         query: torch.Tensor = self.Wq(query)
@@ -81,21 +81,20 @@ class MultiHeadAttentionBlock(nn.Module):
         # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
         attention_scores = (query @ key.transpose(2, 3)) / math.sqrt(self.d_head)
         
-        if mask is not None:
-            assert mask.dtype == torch.bool, f"Mask must be boolean, got {mask.dtype}"
+        assert mask.dtype == torch.bool, f"Mask must be boolean, got {mask.dtype}"
+        
+        if MIXED_PRECISION_ENABLED:
+            attention_scores = attention_scores.to(torch.float32)
             
-            if MIXED_PRECISION_ENABLED:
-                attention_scores = attention_scores.to(torch.float32)
-                
-            attention_scores.masked_fill_(mask == False, -1e09)
+        attention_scores.masked_fill_(mask == False, -1e09)
 
-            # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
-            attention_scores = torch.softmax(
-                attention_scores, dim=-1
-            )
+        # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
+        attention_scores = torch.softmax(
+            attention_scores, dim=-1
+        )
 
-            if MIXED_PRECISION_ENABLED:
-                attention_scores = attention_scores.to(torch.float16)
+        if MIXED_PRECISION_ENABLED:
+            attention_scores = attention_scores.to(torch.float16)
 
         attention_scores = self.dropout(attention_scores)
 
@@ -118,13 +117,14 @@ class FeedForwardBlock(nn.Module):
         self.linear1 = nn.Linear(embed_dim, ff_dim)
         self.linear2 = nn.Linear(ff_dim, embed_dim)
         self.dropout = nn.Dropout(dropout)
+        self.gelu = nn.GELU()
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear2(
             self.dropout(
-                torch.relu(self.linear1(x))
+                self.gelu(self.linear1(x))
             )
         )
 
@@ -195,7 +195,7 @@ class GPTmodel(nn.Module):
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
-    def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         x = self._embed_and_encode_position(x)
         x = self._decode(x, mask)
         return self._project(x)
@@ -213,13 +213,22 @@ class GPTmodel(nn.Module):
             dropout=params.dropout,
             heads=params.heads,
             seq_len=params.seq_len
-        )
+        )        
 
         if weights:
             model.load_state_dict(weights)
         else:
-            for p in model.parameters():
-                if p.dim() > 1:
-                    nn.init.xavier_uniform_(p)
+            def init_weights(m):
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.Embedding):
+                    nn.init.normal_(m.weight, mean=0.0, std=0.02)
+                elif isinstance(m, nn.LayerNorm):
+                    nn.init.ones_(m.weight)
+                    nn.init.zeros_(m.bias)
+            
+            model.apply(init_weights)
 
         return model

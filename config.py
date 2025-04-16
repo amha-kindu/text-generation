@@ -119,7 +119,6 @@ class TrainingConfig(Config):
         self.epochs: int = kwargs.get("epochs", 10)
         self.batch_size: int = kwargs.get("batch_size", 64)
         self.init_lr: float = kwargs.get("init_lr", 2e-04)
-        self.warmup_steps: int = kwargs.get("warmup_steps", 2000)
         self.tb_log_dir: str = kwargs.get("tb_log_dir", "logs")
         self.checkpoint: str = kwargs.get("checkpoint", "amharic-gpt")
         self.validation_samples: int = kwargs.get("validation_samples", 20)
@@ -132,12 +131,15 @@ class TrainingConfig(Config):
 
         if kwargs:
             samples = get_line_count(self.training_data)
-            self.total_steps =  samples // (self.batch_size * WORLD_SIZE)
+            self.total_steps = samples // (self.batch_size * WORLD_SIZE)
+            # Set warmup steps to 5% of the steps per epoch
+            self.warmup_steps = int(0.025 * self.total_steps * WORLD_SIZE)
             if GLOBAL_RANK == COORDINATOR_RANK:
                 LOGGER.info(f"Total training samples: {samples}")
                 LOGGER.info(f"Identified {WORLD_SIZE} GPUs")
                 LOGGER.info(f"Effective batch size: {self.batch_size * WORLD_SIZE}")
                 LOGGER.info(f"Effective steps(per epoch): {self.total_steps}")
+                LOGGER.info(f"Warmup steps: {self.warmup_steps}")
         
         if not os.path.isfile(self.validation_data):
             raise FileNotFoundError(f"File '{self.validation_data}' does not exist")

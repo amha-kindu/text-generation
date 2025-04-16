@@ -9,7 +9,7 @@ from model import GPTmodel
 from datetime import datetime
 import torch.distributed as dist
 from tokenizer import SentencePieceProcessor
-from torch.utils.tensorboard import SummaryWriter
+from tensorboard_logger import TensorboardLogger
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
@@ -103,8 +103,7 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func: nn.Cros
 
 
 def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_dataset: IDataset, is_distributed: bool = False, state: dict = {}) -> None:
-    writer = SummaryWriter(config.tb_log_dir)
-    writer.add_graph(model, input_to_model=torch.randint(0, 100, (1, model.config.seq_len)).to(DEVICE))
+    tb_logger = TensorboardLogger(config.tb_log_dir, is_distributed, GLOBAL_RANK, COORDINATOR_RANK)
 
     if is_distributed:
         model = DistributedDataParallel(model, device_ids=[LOCAL_RANK])
@@ -122,7 +121,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
 
     stop_signal = torch.tensor([0], device=DEVICE)
     early_stopping = EarlyStopping(patience=3, min_delta=0.01)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.init_lr, weight_decay=1e-2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.init_lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
     
     alpha = 0.9
@@ -130,6 +129,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
     global_step = 0
     training_loss = 0
     validation_loss = 0
+    top5_avg_probs = torch.tensor([])
     if state:
         training_state = state["training_state"]
         initial_epoch = training_state["epoch"] + 1
@@ -140,8 +140,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
         optimizer.load_state_dict(training_state["optimizer_state"])
         scheduler.load_state_dict(training_state["lr_scheduler_state"])
 
-    loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(DEVICE)
-
+    loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.tokenizer.pad_id(), label_smoothing=0.05).to(DEVICE)
     batch_iterator = train_dataset.batch_iterator(config.batch_size)
 
     val_sampler = RandomSampler(val_dataset, replacement=True, num_samples=config.validation_samples)
@@ -174,14 +173,21 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                     label.view(-1)
                 )
             
+            loss_tensor = torch.tensor(batch_loss.item(), device=DEVICE)
+            torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
+
             if global_step == 0:
-                # Initialize
-                training_loss = batch_loss.item()
+                training_loss = loss_tensor.item() / WORLD_SIZE
             else:
-                # Update training_loss to calculate its exponential moving average
-                training_loss = alpha * training_loss + (1 - alpha) * batch_loss.item()
+                training_loss = alpha * training_loss + (1 - alpha) * (loss_tensor.item() / WORLD_SIZE)
 
             if GLOBAL_RANK == COORDINATOR_RANK:
+                avg_probs = torch.topk(torch.softmax(logits, dim=-1), k=5, dim=-1)[0].mean(dim=-1).flatten().cpu().detach()
+                top5_avg_probs = torch.cat([top5_avg_probs, avg_probs])
+                
+                if global_step % 1000 == 0:
+                    tb_logger.log_histogram("Top-5 Prediction Confidence Distribution", top5_avg_probs.numpy(), global_step)
+
                 if global_step % 100 == 0:
                     val_loss = validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
                     if global_step == 0:
@@ -190,22 +196,10 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                         # Update validation_loss to calculate its exponential moving average
                         validation_loss = alpha * validation_loss + (1 - alpha) * val_loss
                     
-                    writer.add_scalars(
-                        "Loss",
-                        { 
-                            "Validation": validation_loss
-                        },
-                        global_step
-                    )
-                    writer.add_scalar('Loss Gap', validation_loss - training_loss, global_step)
-                writer.add_scalars(
-                    "Loss",
-                    {
-                        "Training": training_loss
-                    },
-                    global_step
-                )
-                writer.flush()
+                    tb_logger.log_scalars("Loss", {"Validation": validation_loss}, global_step)
+                    tb_logger.log_scalar('Loss Gap', validation_loss - training_loss, global_step)
+
+                tb_logger.log_scalars("Loss", {"Training": training_loss}, global_step)
 
                 batch_iterator.set_postfix({
                     "train_loss": f"{training_loss:6.3f}", 
@@ -216,11 +210,10 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                 scaler.scale(batch_loss).backward()
                 
                 scaler.unscale_(optimizer)
-                
-                gradients = [p.grad for p in model.parameters() if p.grad is not None]
-                grad_vector_pre_clip = torch.cat([g.view(-1) for g in gradients])
-                grad_norm_pre_clip = torch.linalg.vector_norm(grad_vector_pre_clip).item()
-                
+
+                if global_step % 100 == 0:
+                    tb_logger.log_gradients(model.named_parameters(), global_step)                   
+
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 
                 scaler.step(optimizer)
@@ -228,9 +221,8 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
             else:
                 batch_loss.backward()
                 
-                gradients = [p.grad for p in model.parameters() if p.grad is not None]
-                grad_vector = torch.cat([g.view(-1) for g in gradients])
-                grad_norm_pre_clip = torch.linalg.vector_norm(grad_vector).item()
+                if global_step % 100 == 0:
+                    tb_logger.log_gradients(model.named_parameters(), global_step)
                 
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 
@@ -238,8 +230,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
             
             scheduler.step()
 
-            writer.add_scalar("Learning Rate", scheduler.get_last_lr()[0], global_step)
-            writer.add_scalar("Gradients(norm)/Pre-Clip", grad_norm_pre_clip, global_step)
+            tb_logger.log_scalar("Learning Rate", scheduler.get_last_lr()[0], global_step)
             optimizer.zero_grad()
 
             if global_step and global_step % 22000 == 0 and GLOBAL_RANK == COORDINATOR_RANK:
@@ -272,6 +263,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
 
     if is_distributed:
         dist.barrier()
+    tb_logger.close()
 
 
 
@@ -283,7 +275,6 @@ if __name__ == "__main__":
     parser.add_argument("--testing-data", type=str, default=DEFAULT_TRAINING_CONFIG.testing_data, help="Path to the testing dataset")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_TRAINING_CONFIG.batch_size, help="Batch size used during training")
     parser.add_argument("--init-lr", type=float, default=DEFAULT_TRAINING_CONFIG.init_lr, help="Initial learning rate")
-    parser.add_argument("--warmup-steps", type=int, default=DEFAULT_TRAINING_CONFIG.warmup_steps, help="Number of warmup steps")
     parser.add_argument("--tb-log-dir", type=str, default=DEFAULT_TRAINING_CONFIG.tb_log_dir, help="Initial learning rate")
     parser.add_argument("--epochs", type=int, default=DEFAULT_TRAINING_CONFIG.epochs, help="Number of epochs to train the model")
     parser.add_argument("--seq-len", type=int, default=DEFAULT_MODEL_CONFIG.seq_len, help="Sequence length of the input")
