@@ -120,11 +120,10 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
     scaler = torch.GradScaler(device=DEVICE.type) if MIXED_PRECISION_ENABLED else None
 
     stop_signal = torch.tensor([0], device=DEVICE)
-    early_stopping = EarlyStopping(patience=config.total_steps, min_delta=0.01)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.init_lr, weight_decay=1e-4)
+    early_stopping = EarlyStopping(patience=config.es_patience, min_delta=config.es_min_delta)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.init_lr, weight_decay=config.weight_decay)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
     
-    alpha = 0.9
     initial_epoch = 0
     global_step = 0
     training_loss = 0
@@ -139,7 +138,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
         optimizer.load_state_dict(training_state["optimizer_state"])
         scheduler.load_state_dict(training_state["lr_scheduler_state"])
 
-    loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.tokenizer.pad_id(), label_smoothing=0.05).to(DEVICE)
+    loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.tokenizer.pad_id(), label_smoothing=config.label_smoothing).to(DEVICE)
     batch_iterator = train_dataset.batch_iterator(config.batch_size)
 
     val_sampler = RandomSampler(val_dataset, replacement=True, num_samples=config.validation_samples)
@@ -180,20 +179,20 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
             if global_step == 0:
                 training_loss = loss_tensor.item() / WORLD_SIZE
             else:
-                training_loss = alpha * training_loss + (1 - alpha) * (loss_tensor.item() / WORLD_SIZE)
+                training_loss = config.ema_alpha * training_loss + (1 - config.ema_alpha) * (loss_tensor.item() / WORLD_SIZE)
 
             if GLOBAL_RANK == COORDINATOR_RANK:
                 if global_step % 1000 == 0:
                     top5_avg_probs = torch.topk(torch.softmax(logits, dim=-1), k=5, dim=-1)[0].mean(dim=-1).flatten().cpu().detach()
                     tb_logger.log_histogram("Top-5 Prediction Confidence Distribution", top5_avg_probs.numpy(), global_step)
 
-                if global_step % 100 == 0:
+                if global_step % config.validate_every == 0:
                     val_loss = validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
                     if global_step == 0:
                         validation_loss = val_loss
                     else:
                         # Update validation_loss to calculate its exponential moving average
-                        validation_loss = alpha * validation_loss + (1 - alpha) * val_loss
+                        validation_loss = config.ema_alpha * validation_loss + (1 - config.ema_alpha) * val_loss
                     
                     tb_logger.log_scalars("Loss", {"Validation": validation_loss}, global_step)
                     tb_logger.log_scalar('Loss Gap', validation_loss - training_loss, global_step)
@@ -214,7 +213,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                     tb_logger.log_named_gradients(model.named_parameters(), global_step)
                 tb_logger.log_gradients(model.parameters(), global_step)
 
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.max_norm)
                 
                 scaler.step(optimizer)
                 scaler.update()
@@ -225,7 +224,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                     tb_logger.log_named_gradients(model.named_parameters(), global_step)
                 tb_logger.log_gradients(model.parameters(), global_step)
                 
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.max_norm)
                 
                 optimizer.step()
             
@@ -244,7 +243,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                 LOGGER.info(f"Early stopping triggered at epoch {epoch+1}; avg val loss {early_stopping.best_loss:.4f} did not decrease significantly for {early_stopping.patience} consecutive weight updates")
                 break
             
-            if global_step and global_step % 22_000 == 0 and GLOBAL_RANK == COORDINATOR_RANK:
+            if global_step and global_step % config.save_every == 0 and GLOBAL_RANK == COORDINATOR_RANK:
                 torch.save({
                     "weights": model.module.state_dict() if is_distributed else model.state_dict(),
                     "model_config": model.module.config if is_distributed else model.config,
@@ -275,7 +274,15 @@ if __name__ == "__main__":
     parser.add_argument("--validation-data", type=str, default=DEFAULT_TRAINING_CONFIG.validation_data, help="Path to the validation dataset")
     parser.add_argument("--testing-data", type=str, default=DEFAULT_TRAINING_CONFIG.testing_data, help="Path to the testing dataset")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_TRAINING_CONFIG.batch_size, help="Batch size used during training")
+    parser.add_argument("--save-every", type=int, default=DEFAULT_TRAINING_CONFIG.save_every, help="Number of weight updates between checkpoints")
+    parser.add_argument("--validate-every", type=int, default=DEFAULT_TRAINING_CONFIG.validate_every, help="Number of weight updates between validations")
     parser.add_argument("--init-lr", type=float, default=DEFAULT_TRAINING_CONFIG.init_lr, help="Initial learning rate")
+    parser.add_argument("--weight-decay", type=float, default=DEFAULT_TRAINING_CONFIG.weight_decay, help="L2 regularization coefficient")
+    parser.add_argument("--max-norm", type=float, default=DEFAULT_TRAINING_CONFIG.max_norm, help="Gradient clipping threshold")
+    parser.add_argument("--ema-alpha", type=float, default=DEFAULT_TRAINING_CONFIG.ema_alpha, help="Exponential moving average parameter")
+    parser.add_argument("--label-smoothing", type=float, default=DEFAULT_TRAINING_CONFIG.label_smoothing, help="Label smoothing factor")
+    parser.add_argument("--es-patience", type=int, default=DEFAULT_TRAINING_CONFIG.es_patience, help="Early stopping patience(number of steps)")
+    parser.add_argument("--es-min-delta", type=float, default=DEFAULT_TRAINING_CONFIG.es_min_delta, help="Early stopping min delta")
     parser.add_argument("--tb-log-dir", type=str, default=DEFAULT_TRAINING_CONFIG.tb_log_dir, help="Initial learning rate")
     parser.add_argument("--epochs", type=int, default=DEFAULT_TRAINING_CONFIG.epochs, help="Number of epochs to train the model")
     parser.add_argument("--seq-len", type=int, default=DEFAULT_MODEL_CONFIG.seq_len, help="Sequence length of the input")
