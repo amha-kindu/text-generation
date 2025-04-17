@@ -41,7 +41,7 @@ class PositionEncoder(nn.Module):
         # (SEQ_LEN, EMBED_DIM) --> (1, SEQ_LEN, EMBED_DIM)
         position_encodings = position_encodings.unsqueeze(0)
 
-        self.register_buffer("position_encodings", position_encodings.to(torch.float32))
+        self.register_buffer("position_encodings", position_encodings)
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
@@ -57,10 +57,10 @@ class MultiHeadAttentionBlock(nn.Module):
         self.heads = heads
         self.d_head: int = embed_dim // heads
 
-        self.Wq: nn.Linear = nn.Linear(embed_dim, embed_dim, bias=True)
-        self.Wk: nn.Linear = nn.Linear(embed_dim, embed_dim, bias=True)
-        self.Wv: nn.Linear = nn.Linear(embed_dim, embed_dim, bias=True)
-        self.Wo: nn.Linear = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.Wq: nn.Linear = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.Wk: nn.Linear = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.Wv: nn.Linear = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.Wo: nn.Linear = nn.Linear(embed_dim, embed_dim, bias=False)
 
         self.dropout = nn.Dropout(dropout)
     
@@ -174,6 +174,7 @@ class GPTmodel(nn.Module):
         self.embedding = Embedding(embed_dim, vocab_size)
         self.position_encoder = PositionEncoder(seq_len, embed_dim, dropout)
         self.projection = Projection(embed_dim, vocab_size)
+        self.layer_norm = nn.LayerNorm(embed_dim)
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
@@ -191,7 +192,7 @@ class GPTmodel(nn.Module):
     def _decode(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         for decoder in self.decoders:
             x = decoder(x, mask)
-        return x
+        return self.layer_norm(x)
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, VOCAB_SIZE)

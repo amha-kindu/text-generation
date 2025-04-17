@@ -120,7 +120,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
     scaler = torch.GradScaler(device=DEVICE.type) if MIXED_PRECISION_ENABLED else None
 
     stop_signal = torch.tensor([0], device=DEVICE)
-    early_stopping = EarlyStopping(patience=3, min_delta=0.01)
+    early_stopping = EarlyStopping(patience=config.total_steps, min_delta=0.01)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.init_lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
     
@@ -129,10 +129,9 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
     global_step = 0
     training_loss = 0
     validation_loss = 0
-    top5_avg_probs = torch.tensor([])
     if state:
         training_state = state["training_state"]
-        initial_epoch = training_state["epoch"] + 1
+        initial_epoch = training_state["epoch"]
         global_step = training_state["global_step"]
         training_loss = training_state["training_loss"]
         validation_loss = training_state["validation_loss"]
@@ -148,8 +147,10 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
 
     for epoch in range(initial_epoch, config.epochs):
         batch_iterator = tqdm(batch_iterator, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch+1}/{config.epochs}", disable = GLOBAL_RANK != COORDINATOR_RANK, total=config.total_steps)
-        for batch in batch_iterator:
-            model.train() 
+        for i, batch in enumerate(batch_iterator):
+            if (epoch + 1) * (i + 1) <= global_step:
+                continue
+            model.train()
                  
             # (N_BATCHES, SEQ_LEN)
             decoder_input: torch.Tensor = batch["decoder_input"].to(DEVICE)
@@ -182,10 +183,8 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                 training_loss = alpha * training_loss + (1 - alpha) * (loss_tensor.item() / WORLD_SIZE)
 
             if GLOBAL_RANK == COORDINATOR_RANK:
-                avg_probs = torch.topk(torch.softmax(logits, dim=-1), k=5, dim=-1)[0].mean(dim=-1).flatten().cpu().detach()
-                top5_avg_probs = torch.cat([top5_avg_probs, avg_probs])
-                
                 if global_step % 1000 == 0:
+                    top5_avg_probs = torch.topk(torch.softmax(logits, dim=-1), k=5, dim=-1)[0].mean(dim=-1).flatten().cpu().detach()
                     tb_logger.log_histogram("Top-5 Prediction Confidence Distribution", top5_avg_probs.numpy(), global_step)
 
                 if global_step % 100 == 0:
@@ -212,7 +211,8 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                 scaler.unscale_(optimizer)
 
                 if global_step % 100 == 0:
-                    tb_logger.log_gradients(model.named_parameters(), global_step)                   
+                    tb_logger.log_named_gradients(model.named_parameters(), global_step)
+                tb_logger.log_gradients(model.parameters(), global_step)
 
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 
@@ -222,7 +222,8 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                 batch_loss.backward()
                 
                 if global_step % 100 == 0:
-                    tb_logger.log_gradients(model.named_parameters(), global_step)
+                    tb_logger.log_named_gradients(model.named_parameters(), global_step)
+                tb_logger.log_gradients(model.parameters(), global_step)
                 
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 
@@ -233,17 +234,17 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
             tb_logger.log_scalar("Learning Rate", scheduler.get_last_lr()[0], global_step)
             optimizer.zero_grad()
 
-            if global_step and global_step % 22000 == 0 and GLOBAL_RANK == COORDINATOR_RANK:
-                stop_training = early_stopping(validation_loss)
+            stop_training = early_stopping(validation_loss)
 
-                stop_signal[0] = int(stop_training)
-                if is_distributed:
-                    dist.broadcast(stop_signal, src=COORDINATOR_RANK)
-                    
-                if stop_signal.item() > 0:
-                    LOGGER.info(f"Early stopping triggered at epoch {epoch+1}; avg val loss {early_stopping.best_loss:.4f} did not decrease significantly for {early_stopping.patience} consecutive epochs")
-                    break
-                
+            stop_signal[0] = int(stop_training)
+            if is_distributed:
+                dist.broadcast(stop_signal, src=COORDINATOR_RANK)
+            
+            if stop_signal.item() > 0 and GLOBAL_RANK == COORDINATOR_RANK:
+                LOGGER.info(f"Early stopping triggered at epoch {epoch+1}; avg val loss {early_stopping.best_loss:.4f} did not decrease significantly for {early_stopping.patience} consecutive weight updates")
+                break
+            
+            if global_step and global_step % 22_000 == 0 and GLOBAL_RANK == COORDINATOR_RANK:
                 torch.save({
                     "weights": model.module.state_dict() if is_distributed else model.state_dict(),
                     "model_config": model.module.config if is_distributed else model.config,
@@ -291,13 +292,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     
-    world_size = 1
     if args.is_distributed:
         assert torch.cuda.device_count() > 1, "Must have more than one CUDA supporting GPUs to initiate distributed training"
         assert args.dist_backend in ["nccl", "gloo" "mpi", "ucc"], "Distributed backend must be one of the following: nccl, gloo, mpi or ucc"
 
         dist.init_process_group(backend=args.dist_backend)
-        world_size = dist.get_world_size()
 
     assert args.embed_dim % args.heads == 0, "embed_dim must be divisible by heads"
 
@@ -327,14 +326,14 @@ if __name__ == "__main__":
     if os.path.getsize(training_config.training_data) > 200 * 1024 * 1024:
         if GLOBAL_RANK == COORDINATOR_RANK:
             LOGGER.info(f"File '{os.path.basename(training_config.training_data)}' too large! streaming file...")
-        train_dataset = StreamingTextDataset(training_config.training_data, tokenizer, world_size, LOCAL_RANK)
+        train_dataset = StreamingTextDataset(training_config.training_data, tokenizer)
     else:
         train_dataset = TextDataset(training_config.training_data, tokenizer)
     
     if os.path.getsize(training_config.testing_data) > 200 * 1024 * 1024:
         if GLOBAL_RANK == COORDINATOR_RANK:
             LOGGER.info(f"File '{os.path.basename(training_config.testing_data)}' too large! streaming file...")
-        test_dataset = StreamingTextDataset(training_config.testing_data, tokenizer, world_size, LOCAL_RANK)
+        test_dataset = StreamingTextDataset(training_config.testing_data, tokenizer)
     else:
         test_dataset = TextDataset(training_config.testing_data, tokenizer)
 

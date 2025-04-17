@@ -34,6 +34,7 @@ COORDINATOR_RANK = 0
 GLOBAL_RANK = int(os.getenv("RANK", "0"))
 LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
 WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
+LOCAL_WORLD_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", "1"))
 WORKING_DIR = os.path.dirname(os.path.realpath(__file__))
 WEIGHTS_DIRECTORY = os.path.join(WORKING_DIR, "weights")
 
@@ -127,13 +128,13 @@ class TrainingConfig(Config):
         self.testing_data: str = kwargs.get("testing_data", os.path.join(WORKING_DIR, "pretraining-corpus", "test.jsonl"))
         
         if not os.path.isfile(self.training_data):
-            raise FileNotFoundError(f"File '{self.testing_data}' does not exist")
+            raise FileNotFoundError(f"File '{self.training_data}' does not exist")
 
         if kwargs:
             samples = get_line_count(self.training_data)
             self.total_steps = samples // (self.batch_size * WORLD_SIZE)
-            # Set warmup steps to 5% of the steps per epoch
-            self.warmup_steps = int(0.025 * self.total_steps * WORLD_SIZE)
+            # Set warmup steps to 1% of the steps per epoch
+            self.warmup_steps = int(0.01 * self.total_steps * WORLD_SIZE)
             if GLOBAL_RANK == COORDINATOR_RANK:
                 LOGGER.info(f"Total training samples: {samples}")
                 LOGGER.info(f"Identified {WORLD_SIZE} GPUs")

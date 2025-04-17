@@ -33,7 +33,7 @@ class TensorboardLogger:
         if mode == 'scalar':
             self.writer.add_scalar(tag, value, step)
         elif mode == 'histogram':
-            self.writer.add_histogram(tag, value, step)
+            self.writer.add_histogram(tag, value, step, bins=10000)
         elif mode == 'scalars':
             self.writer.add_scalars(tag, value, step)
         elif mode == 'text':
@@ -62,17 +62,17 @@ class TensorboardLogger:
         if self.is_main():
             self.queue.put((tag, fig, step, 'figure'))
     
-    def log_gradients(self, named_params, step):
-        grad_vector = None
+    def log_named_gradients(self, named_params, step):
         for name, param in named_params:
             if param.grad is not None:
                 grad = param.grad.detach()
                 grad_norm = grad.norm().item()
-                grad_vector = torch.cat([grad.view(-1)])
                 self.log_scalar(f"GradNorm/{name}", grad_norm, step)
-                self.log_histogram(f"GradHistogram/{name}", grad, step)
-        grad_norm_pre_clip = torch.linalg.vector_norm(grad_vector).item()
-        self.log_scalar("GradNorm/Overall", grad_norm_pre_clip, step)
+    
+    def log_gradients(self, params, step):
+        grad_vector = torch.cat([p.grad.view(-1) for p in params if p.grad is not None])
+        grad_norm = torch.linalg.vector_norm(grad_vector).item()
+        self.log_scalar("GradNorm/Overall", grad_norm, step)
 
     def close(self):
         if self.is_main():

@@ -36,7 +36,6 @@ class IDataset(Dataset, ABC):
         raise NotImplementedError("Subclass must implement the 'batch_iterator' abstractmethod!")
     
     def datapoint(self, token_ids: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
-        token_ids = token_ids[:self.max_len]
         padding = self.max_len - len(token_ids)
         
         # (SEQ_LEN,)
@@ -122,11 +121,8 @@ class IStreamDataset(IterableDataset, IDataset):
 
 
 class StreamingTextDataset(IStreamDataset):
-    def __init__(self, file_path: str, tokenizer: SentencePieceProcessor, world_size: int = 1, rank: int = 0) -> None:
+    def __init__(self, file_path: str, tokenizer: SentencePieceProcessor) -> None:
         super().__init__(file_path, tokenizer)
-        self.rank = rank
-        self.workers = 4
-        self.world_size = world_size
     
     @staticmethod
     def collate_fn(batch):
@@ -141,7 +137,7 @@ class StreamingTextDataset(IStreamDataset):
             self,
             batch_size=batch_size,
             collate_fn=self.collate_fn,
-            num_workers=self.workers,
+            num_workers=LOCAL_WORLD_SIZE,
             pin_memory=True
         )
 
@@ -150,8 +146,8 @@ class StreamingTextDataset(IStreamDataset):
         worker_id = worker_info.id if worker_info else 0
         num_workers = worker_info.num_workers if worker_info else 1
 
-        effective_rank = self.rank * num_workers + worker_id
-        effective_world_size = self.world_size * num_workers
+        effective_rank = GLOBAL_RANK * num_workers + worker_id
+        effective_world_size = WORLD_SIZE * num_workers
         
         with open(self.file_path, 'r', encoding='utf-8') as f:
             for i, line in enumerate(f):
