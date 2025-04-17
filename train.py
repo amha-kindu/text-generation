@@ -114,7 +114,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
             return float(current_step) / float(max(1, config.warmup_steps))
         return max(
             0.0,
-            0.5 * (1.0 + math.cos(math.pi * (current_step - config.warmup_steps) / float(config.total_steps - config.warmup_steps)))
+            0.5 * (1.0 + math.cos(math.pi * (current_step - config.warmup_steps) / float(config.updates_per_epoch - config.warmup_steps)))
         )
     
     scaler = torch.GradScaler(device=DEVICE.type) if MIXED_PRECISION_ENABLED else None
@@ -124,8 +124,9 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.init_lr, weight_decay=config.weight_decay)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
     
-    initial_epoch = 0
+    accum_loss = 0
     global_step = 0
+    initial_epoch = 0
     training_loss = 0
     validation_loss = 0
     if state:
@@ -145,10 +146,11 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
     val_batch_iterator = val_dataset.batch_iterator(config.batch_size, sampler=val_sampler)
 
     for epoch in range(initial_epoch, config.epochs):
-        batch_iterator = tqdm(batch_iterator, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch+1}/{config.epochs}", disable = GLOBAL_RANK != COORDINATOR_RANK, total=config.total_steps)
+        batch_iterator = tqdm(batch_iterator, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch+1}/{config.epochs}", disable = GLOBAL_RANK != COORDINATOR_RANK, total=config.samples_per_epoch)
         for i, batch in enumerate(batch_iterator):
-            if (epoch + 1) * (i + 1) <= global_step:
+            if (epoch + 1) * (i + 1) <= global_step * config.grad_accum_steps:
                 continue
+            
             model.train()
                  
             # (N_BATCHES, SEQ_LEN)
@@ -165,7 +167,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                 logits: torch.Tensor = model(decoder_input, decoder_mask)
 
                 # Compute the cross-entropy loss
-                batch_loss = loss_func(
+                batch_loss: torch.Tensor = loss_func(
                     # (N_BATCHES, SEQ_LEN, VOCAB_SIZE) --> (N_BATCHES * SEQ_LEN, VOCAB_SIZE)
                     logits.view(-1, train_dataset.tokenizer.vocab_size()),
 
@@ -175,96 +177,92 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
             
             loss_tensor = torch.tensor(batch_loss.item(), device=DEVICE)
             torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
+            loss_avg = loss_tensor.item() / WORLD_SIZE
+            accum_loss += loss_avg
 
-            if global_step == 0:
-                training_loss = loss_tensor.item() / WORLD_SIZE
-            else:
-                training_loss = config.ema_alpha * training_loss + (1 - config.ema_alpha) * (loss_tensor.item() / WORLD_SIZE)
-
-            if GLOBAL_RANK == COORDINATOR_RANK:
-                if global_step % 1000 == 0:
-                    top5_avg_probs = torch.topk(torch.softmax(logits, dim=-1), k=5, dim=-1)[0].mean(dim=-1).flatten().cpu().detach()
-                    tb_logger.log_histogram("Top-5 Prediction Confidence Distribution", top5_avg_probs.numpy(), global_step)
-
-                if global_step % config.validate_every == 0:
-                    val_loss = validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
-                    if global_step == 0:
-                        validation_loss = val_loss
-                    else:
-                        # Update validation_loss to calculate its exponential moving average
-                        validation_loss = config.ema_alpha * validation_loss + (1 - config.ema_alpha) * val_loss
-                    
-                    tb_logger.log_scalars("Loss", {"Validation": validation_loss}, global_step)
-                    tb_logger.log_scalar('Loss Gap', validation_loss - training_loss, global_step)
-
-                tb_logger.log_scalars("Loss", {"Training": training_loss}, global_step)
-
-                batch_iterator.set_postfix({
-                    "train_loss": f"{training_loss:6.3f}", 
-                    "val_loss": f"{validation_loss:6.3f}"
-                })
+            accum_grad = (i + 1) % config.grad_accum_steps != 0 and decoder_input.shape[0] == config.batch_size
 
             if MIXED_PRECISION_ENABLED:
                 scaler.scale(batch_loss).backward()
-                
-                scaler.unscale_(optimizer)
-
-                if global_step % 100 == 0:
+                if not accum_grad:
+                    scaler.unscale_(optimizer)
+                    tb_logger.log_gradients(model.parameters(), global_step)
                     tb_logger.log_named_gradients(model.named_parameters(), global_step)
-                tb_logger.log_gradients(model.parameters(), global_step)
-
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.max_norm)
-                
-                scaler.step(optimizer)
-                scaler.update()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.max_norm)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    scheduler.step()
+                    optimizer.zero_grad()
             else:
                 batch_loss.backward()
-                
-                if global_step % 100 == 0:
+                if not accum_grad:
+                    tb_logger.log_gradients(model.parameters(), global_step)
                     tb_logger.log_named_gradients(model.named_parameters(), global_step)
-                tb_logger.log_gradients(model.parameters(), global_step)
-                
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.max_norm)
-                
-                optimizer.step()
-            
-            scheduler.step()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.max_norm)
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
 
-            tb_logger.log_scalar("Learning Rate", scheduler.get_last_lr()[0], global_step)
-            optimizer.zero_grad()
+            if not accum_grad:
+                if training_loss == 0:
+                    training_loss = (accum_loss / config.grad_accum_steps)
+                else:
+                    training_loss = config.ema_alpha * training_loss + (1 - config.ema_alpha) * (accum_loss / config.grad_accum_steps)
+                accum_loss = 0.0
 
-            stop_training = early_stopping(validation_loss)
+                if GLOBAL_RANK == COORDINATOR_RANK:
+                    tb_logger.log_scalars("Loss", {"Training": training_loss}, global_step)
+                    tb_logger.log_scalar("Learning Rate", scheduler.get_last_lr()[0], global_step)
+                                        
+                    if global_step % config.validate_every == 0:
+                        val_loss = validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
+                        
+                        if validation_loss == 0:
+                            validation_loss = val_loss
+                        else:
+                            validation_loss = config.ema_alpha * validation_loss + (1 - config.ema_alpha) * val_loss
+                        
+                        stop_training = early_stopping(validation_loss)
+                        stop_signal[0] = int(stop_training)
+                        tb_logger.log_scalars("Loss", {"Validation": validation_loss}, global_step)
+                        tb_logger.log_scalar('Loss Gap', validation_loss - training_loss, global_step)
+                    
+                    batch_iterator.set_postfix({
+                        "train_loss": f"{training_loss:6.3f}",
+                        "val_loss": f"{validation_loss:6.3f}"
+                    })
+                    
+                    if global_step % 1000 == 0:
+                        top5_avg_probs = torch.topk(torch.softmax(logits, dim=-1), k=5, dim=-1)[0].mean(dim=-1).flatten().cpu().detach()
+                        tb_logger.log_histogram("Top-5 Prediction Confidence Distribution", top5_avg_probs.numpy(), global_step)
+                    
+                    if global_step and global_step % config.save_every == 0:
+                        torch.save({
+                            "weights": model.module.state_dict() if is_distributed else model.state_dict(),
+                            "model_config": model.module.config if is_distributed else model.config,
+                            "training_state": {
+                                "epoch": epoch,
+                                "global_step": global_step,
+                                "training_loss": training_loss,
+                                "validation_loss": validation_loss,
+                                "best_val_loss": early_stopping.best_loss,
+                                "optimizer_state": optimizer.state_dict(),
+                                "lr_scheduler_state": scheduler.state_dict()
+                            },
+                            "training_config": config
+                        }, os.path.join(config.checkpoint))
 
-            stop_signal[0] = int(stop_training)
+                global_step += 1
+
             if is_distributed:
                 dist.broadcast(stop_signal, src=COORDINATOR_RANK)
-            
-            if stop_signal.item() > 0 and GLOBAL_RANK == COORDINATOR_RANK:
+            if stop_signal.item() > 0:
                 LOGGER.info(f"Early stopping triggered at epoch {epoch+1}; avg val loss {early_stopping.best_loss:.4f} did not decrease significantly for {early_stopping.patience} consecutive weight updates")
                 break
-            
-            if global_step and global_step % config.save_every == 0 and GLOBAL_RANK == COORDINATOR_RANK:
-                torch.save({
-                    "weights": model.module.state_dict() if is_distributed else model.state_dict(),
-                    "model_config": model.module.config if is_distributed else model.config,
-                    "training_state": {
-                        "epoch": epoch,
-                        "global_step": global_step,
-                        "training_loss": training_loss,
-                        "validation_loss": validation_loss,
-                        "best_val_loss": early_stopping.best_loss,
-                        "optimizer_state": optimizer.state_dict(),
-                        "lr_scheduler_state": scheduler.state_dict()
-                    },
-                    "training_config": config
-                }, os.path.join(config.checkpoint))
-            
-            global_step += 1
 
     if is_distributed:
         dist.barrier()
     tb_logger.close()
-
 
 
 if __name__ == "__main__":
@@ -273,7 +271,8 @@ if __name__ == "__main__":
     parser.add_argument("--training-data", type=str, default=DEFAULT_TRAINING_CONFIG.training_data, help="Path to the training dataset")
     parser.add_argument("--validation-data", type=str, default=DEFAULT_TRAINING_CONFIG.validation_data, help="Path to the validation dataset")
     parser.add_argument("--testing-data", type=str, default=DEFAULT_TRAINING_CONFIG.testing_data, help="Path to the testing dataset")
-    parser.add_argument("--batch-size", type=int, default=DEFAULT_TRAINING_CONFIG.batch_size, help="Batch size used during training")
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_TRAINING_CONFIG.batch_size, help="Batch size")
+    parser.add_argument("--grad-accum-steps", type=int, default=DEFAULT_TRAINING_CONFIG.grad_accum_steps, help="Gradient accumulation steps")
     parser.add_argument("--save-every", type=int, default=DEFAULT_TRAINING_CONFIG.save_every, help="Number of weight updates between checkpoints")
     parser.add_argument("--validate-every", type=int, default=DEFAULT_TRAINING_CONFIG.validate_every, help="Number of weight updates between validations")
     parser.add_argument("--init-lr", type=float, default=DEFAULT_TRAINING_CONFIG.init_lr, help="Initial learning rate")

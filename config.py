@@ -119,6 +119,7 @@ class TrainingConfig(Config):
     def __init__(self, **kwargs):
         self.epochs: int = kwargs.get("epochs", 10)
         self.batch_size: int = kwargs.get("batch_size", 64)
+        self.grad_accum_steps: int = kwargs.get("grad_accum_steps", 1)
         self.init_lr: float = kwargs.get("init_lr", 2e-04)
         self.weight_decay: float = kwargs.get("weight_decay", 0.01)
         self.max_norm: float = kwargs.get("max_norm", 1.0)
@@ -140,15 +141,14 @@ class TrainingConfig(Config):
 
         if kwargs:
             samples = get_line_count(self.training_data)
-            self.total_steps = samples // (self.batch_size * WORLD_SIZE)
+            self.samples_per_epoch = samples // (self.batch_size * WORLD_SIZE)
+            self.updates_per_epoch = samples // (self.batch_size * self.grad_accum_steps * WORLD_SIZE)
             # Set warmup steps to 1% of the steps per epoch
-            self.warmup_steps = int(0.01 * self.total_steps * WORLD_SIZE)
+            self.warmup_steps = int(0.01 * self.updates_per_epoch)
             if GLOBAL_RANK == COORDINATOR_RANK:
+                numerical_configs = {k: v for k, v in self.to_dict().items() if not isinstance(v, str)}
                 LOGGER.info(f"Total training samples: {samples}")
-                LOGGER.info(f"Identified {WORLD_SIZE} GPUs")
-                LOGGER.info(f"Effective batch size: {self.batch_size * WORLD_SIZE}")
-                LOGGER.info(f"Effective steps(per epoch): {self.total_steps}")
-                LOGGER.info(f"Warmup steps: {self.warmup_steps}")
+                LOGGER.info(f"Using training config: {numerical_configs}")
         
         if not os.path.isfile(self.validation_data):
             raise FileNotFoundError(f"File '{self.validation_data}' does not exist")
