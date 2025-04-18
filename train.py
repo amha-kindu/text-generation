@@ -234,7 +234,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                     
                     if global_step % 1000 == 0:
                         top5_avg_probs = torch.topk(torch.softmax(logits, dim=-1), k=5, dim=-1)[0].mean(dim=-1).flatten().cpu().detach()
-                        tb_logger.log_histogram("Top-5 Prediction Confidence Distribution", top5_avg_probs.numpy(), global_step)
+                        tb_logger.log_histogram("Top-5 Prediction Confidence Distribution", top5_avg_probs.numpy(), global_step, bins=10000)
                     
                     if global_step and global_step % config.save_every == 0:
                         torch.save({
