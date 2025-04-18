@@ -129,6 +129,7 @@ class TrainingConfig(Config):
         self.es_patience: float = kwargs.get("es_patience", 10000)
         self.tb_log_dir: str = kwargs.get("tb_log_dir", "logs")
         self.checkpoint: str = kwargs.get("checkpoint", "amharic-gpt")
+        self.warmup_steps: int = kwargs.get("warmup_steps", 1000)
         self.save_every: int = kwargs.get("save_every", 1000)
         self.validate_every: int = kwargs.get("validate_every", 100)
         self.validation_samples: int = kwargs.get("validation_samples", 20)
@@ -143,8 +144,6 @@ class TrainingConfig(Config):
             samples = get_line_count(self.training_data)
             self.samples_per_epoch = samples // (self.batch_size * WORLD_SIZE)
             self.updates_per_epoch = samples // (self.batch_size * self.grad_accum_steps * WORLD_SIZE)
-            # Set warmup steps to 1% of the steps per epoch
-            self.warmup_steps = int(0.01 * self.updates_per_epoch)
             if GLOBAL_RANK == COORDINATOR_RANK:
                 numerical_configs = {k: v for k, v in self.to_dict().items() if not isinstance(v, str)}
                 LOGGER.info(f"Total training samples: {samples}")

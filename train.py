@@ -273,6 +273,7 @@ if __name__ == "__main__":
     parser.add_argument("--testing-data", type=str, default=DEFAULT_TRAINING_CONFIG.testing_data, help="Path to the testing dataset")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_TRAINING_CONFIG.batch_size, help="Batch size")
     parser.add_argument("--grad-accum-steps", type=int, default=DEFAULT_TRAINING_CONFIG.grad_accum_steps, help="Gradient accumulation steps")
+    parser.add_argument("--warmup-steps", type=int, default=DEFAULT_TRAINING_CONFIG.warmup_steps, help="Number of warmup steps")
     parser.add_argument("--save-every", type=int, default=DEFAULT_TRAINING_CONFIG.save_every, help="Number of weight updates between checkpoints")
     parser.add_argument("--validate-every", type=int, default=DEFAULT_TRAINING_CONFIG.validate_every, help="Number of weight updates between validations")
     parser.add_argument("--init-lr", type=float, default=DEFAULT_TRAINING_CONFIG.init_lr, help="Initial learning rate")
