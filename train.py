@@ -114,7 +114,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
             return float(current_step) / float(max(1, config.warmup_steps))
         return max(
             0.0,
-            0.5 * (1.0 + math.cos(math.pi * (current_step - config.warmup_steps) / float(config.updates_per_epoch - config.warmup_steps)))
+            0.5 * (1.0 + math.cos(math.pi * (current_step - config.warmup_steps) / float(config.updates_per_epoch * config.epochs - config.warmup_steps)))
         )
     
     scaler = torch.GradScaler(device=DEVICE.type) if MIXED_PRECISION_ENABLED else None
@@ -148,7 +148,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
     for epoch in range(initial_epoch, config.epochs):
         batch_iterator = tqdm(batch_iterator, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch+1}/{config.epochs}", disable = GLOBAL_RANK != COORDINATOR_RANK, total=config.samples_per_epoch)
         for i, batch in enumerate(batch_iterator):
-            if (epoch + 1) * (i + 1) <= global_step * config.grad_accum_steps:
+            if epoch == initial_epoch and i <= (global_step * config.grad_accum_steps) % (epoch if epoch != 0 else float("inf")):
                 continue
             
             model.train()
@@ -236,7 +236,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                         top5_avg_probs = torch.topk(torch.softmax(logits, dim=-1), k=5, dim=-1)[0].mean(dim=-1).flatten().cpu().detach()
                         tb_logger.log_histogram("Top-5 Prediction Confidence Distribution", top5_avg_probs.numpy(), global_step, bins=10000)
                     
-                    if global_step and global_step % config.save_every == 0:
+                    if global_step and global_step % config.save_every == 0 or i == config.samples_per_epoch - 1:
                         torch.save({
                             "weights": model.module.state_dict() if is_distributed else model.state_dict(),
                             "model_config": model.module.config if is_distributed else model.config,
@@ -323,6 +323,14 @@ if __name__ == "__main__":
         if state["training_state"]["epoch"] >= training_config.epochs:
             training_config.epochs *= 2
         state.pop("weights")
+    
+    samples = get_line_count(training_config.training_data)
+    training_config.samples_per_epoch = samples // (training_config.batch_size * WORLD_SIZE)
+    training_config.updates_per_epoch = samples // (training_config.batch_size * training_config.grad_accum_steps * WORLD_SIZE)
+    if GLOBAL_RANK == COORDINATOR_RANK:
+        numerical_configs = {k: v for k, v in training_config.to_dict().items() if not isinstance(v, str)}
+        LOGGER.info(f"Total training samples: {samples}")
+        LOGGER.info(f"Using training config: {numerical_configs}")
         
     os.makedirs(WEIGHTS_DIRECTORY, exist_ok=True)
     tokenizer = SentencePieceProcessor(max_len=model_config.seq_len)

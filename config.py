@@ -139,15 +139,6 @@ class TrainingConfig(Config):
         
         if not os.path.isfile(self.training_data):
             raise FileNotFoundError(f"File '{self.training_data}' does not exist")
-
-        if kwargs:
-            samples = get_line_count(self.training_data)
-            self.samples_per_epoch = samples // (self.batch_size * WORLD_SIZE)
-            self.updates_per_epoch = samples // (self.batch_size * self.grad_accum_steps * WORLD_SIZE)
-            if GLOBAL_RANK == COORDINATOR_RANK:
-                numerical_configs = {k: v for k, v in self.to_dict().items() if not isinstance(v, str)}
-                LOGGER.info(f"Total training samples: {samples}")
-                LOGGER.info(f"Using training config: {numerical_configs}")
         
         if not os.path.isfile(self.validation_data):
             raise FileNotFoundError(f"File '{self.validation_data}' does not exist")
