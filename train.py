@@ -75,7 +75,7 @@ def test(config: TrainingConfig, model: GPTmodel, test_dataset: IDataset, is_dis
 def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func: nn.CrossEntropyLoss):
     model.eval()
 
-    val_loss = 0
+    val_loss = torch.tensor(0, dtype=torch.float32, device=DEVICE)
     for batch in val_batch_iterator:
         # (N_BATCHES, SEQ_LEN)
         decoder_input = batch["decoder_input"].to(DEVICE)
@@ -97,7 +97,8 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func: nn.Cros
                 # (N_BATCHES, SEQ_LEN) --> (N_BATCHES * SEQ_LEN, )
                 label.view(-1)
             ) 
-        val_loss += loss.item()
+
+        val_loss += loss
 
     return val_loss / len(val_batch_iterator)
 
@@ -119,7 +120,6 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
     
     scaler = torch.GradScaler(device=DEVICE.type) if MIXED_PRECISION_ENABLED else None
 
-    stop_signal = torch.tensor([0], device=DEVICE)
     early_stopping = EarlyStopping(patience=config.es_patience, min_delta=config.es_min_delta)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.init_lr, weight_decay=config.weight_decay)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
@@ -172,10 +172,10 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                     label.view(-1)
                 )
             
-            loss_tensor = torch.tensor(batch_loss.item(), device=DEVICE)
-            torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
-            loss_avg = loss_tensor.item() / WORLD_SIZE
-            accum_loss += loss_avg
+            loss_tensor = batch_loss.detach().clone()
+            if is_distributed:
+                torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
+            accum_loss += loss_tensor.item() / WORLD_SIZE
 
             accum_grad = (i + 1) % config.grad_accum_steps != 0 and decoder_input.shape[0] == config.batch_size
 
@@ -206,30 +206,41 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                 else:
                     training_loss = config.ema_alpha * training_loss + (1 - config.ema_alpha) * (accum_loss / config.grad_accum_steps)
                 accum_loss = 0.0
-
-                if GLOBAL_RANK == COORDINATOR_RANK:
-                    tb_logger.log_scalars("Loss", {"Training": training_loss}, global_step)
-                    tb_logger.log_scalar("Learning Rate", scheduler.get_last_lr()[0], global_step)
-                                        
-                    if global_step % config.validate_every == 0:
-                        val_loss = validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
-                        
-                        if validation_loss == 0:
-                            validation_loss = val_loss
+                
+                if global_step % config.validate_every == 0:
+                    val_loss = validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
+                    if is_distributed:
+                        torch.distributed.all_reduce(val_loss, op=torch.distributed.ReduceOp.SUM)
+                    avg_val_loss = val_loss.item() / WORLD_SIZE
+                    
+                    if validation_loss == 0:
+                        validation_loss = avg_val_loss
+                    else:
+                        validation_loss = config.ema_alpha * validation_loss + (1 - config.ema_alpha) * avg_val_loss
+                    
+                    if early_stopping(validation_loss):
+                        LOGGER.info(f"Early stopping triggered at epoch {epoch + 1}; avg val loss {early_stopping.best_loss:.4f} did not decrease significantly for {early_stopping.patience} consecutive weight updates")
+                        if is_distributed:
+                            dist.barrier()
+                            dist.destroy_process_group()
+                            exit(-1)
                         else:
-                            validation_loss = config.ema_alpha * validation_loss + (1 - config.ema_alpha) * val_loss
-                        
-                        stop_training = early_stopping(validation_loss)
-                        stop_signal[0] = int(stop_training)
+                            break                        
+                
+                if GLOBAL_RANK == COORDINATOR_RANK:
+                    if global_step % config.validate_every == 0:
                         tb_logger.log_scalars("Loss", {"Validation": validation_loss}, global_step)
                         tb_logger.log_scalar('Loss Gap', validation_loss - training_loss, global_step)
+                    
+                    tb_logger.log_scalars("Loss", {"Training": training_loss}, global_step)
+                    tb_logger.log_scalar("Learning Rate", scheduler.get_last_lr()[0], global_step)
                     
                     batch_iterator.set_postfix({
                         "train_loss": f"{training_loss:6.3f}",
                         "val_loss": f"{validation_loss:6.3f}"
                     })
                     
-                    if global_step % 1000 == 0:
+                    if global_step % 2000 == 0:
                         top5_avg_probs = torch.topk(torch.softmax(logits, dim=-1), k=5, dim=-1)[0].mean(dim=-1).flatten().cpu().detach()
                         tb_logger.log_histogram("Top-5 Prediction Confidence Distribution", top5_avg_probs.numpy(), global_step, bins=10000)
                     
@@ -250,12 +261,6 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                         }, os.path.join(config.checkpoint))
 
                 global_step += 1
-
-            if is_distributed:
-                dist.broadcast(stop_signal, src=COORDINATOR_RANK)
-            if stop_signal.item() > 0:
-                LOGGER.info(f"Early stopping triggered at epoch {epoch+1}; avg val loss {early_stopping.best_loss:.4f} did not decrease significantly for {early_stopping.patience} consecutive weight updates")
-                break
 
     if is_distributed:
         dist.barrier()
