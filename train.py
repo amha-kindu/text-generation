@@ -148,11 +148,8 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
     for epoch in range(initial_epoch, config.epochs):
         batch_iterator = tqdm(batch_iterator, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch+1}/{config.epochs}", disable = GLOBAL_RANK != COORDINATOR_RANK, total=config.samples_per_epoch)
         for i, batch in enumerate(batch_iterator):
-            if epoch == initial_epoch and i <= (global_step * config.grad_accum_steps) % (epoch if epoch != 0 else float("inf")):
-                continue
-            
             model.train()
-                 
+            
             # (N_BATCHES, SEQ_LEN)
             decoder_input: torch.Tensor = batch["decoder_input"].to(DEVICE)
 
