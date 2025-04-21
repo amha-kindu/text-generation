@@ -177,7 +177,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                 torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
             accum_loss += loss_tensor.item() / WORLD_SIZE
 
-            accum_grad = (i + 1) % config.grad_accum_steps != 0 and decoder_input.shape[0] == config.batch_size
+            accum_grad = (i + 1) % config.grad_accum_steps != 0 and i + 1 != config.samples_per_epoch
 
             if MIXED_PRECISION_ENABLED:
                 scaler.scale(batch_loss).backward()
@@ -201,10 +201,11 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                     optimizer.zero_grad()
 
             if not accum_grad:
+                accum_steps = config.grad_accum_steps if (i + 1) % config.grad_accum_steps == 0 else (i + 1) % config.grad_accum_steps
                 if training_loss == 0:
-                    training_loss = (accum_loss / config.grad_accum_steps)
+                    training_loss = (accum_loss / accum_steps)
                 else:
-                    training_loss = config.ema_alpha * training_loss + (1 - config.ema_alpha) * (accum_loss / config.grad_accum_steps)
+                    training_loss = config.ema_alpha * training_loss + (1 - config.ema_alpha) * (accum_loss / accum_steps)
                 accum_loss = 0.0
                 
                 if global_step % config.validate_every == 0:
@@ -327,8 +328,8 @@ if __name__ == "__main__":
         state.pop("weights")
     
     samples = get_line_count(training_config.training_data)
-    training_config.samples_per_epoch = samples // (training_config.batch_size * WORLD_SIZE)
-    training_config.updates_per_epoch = samples // (training_config.batch_size * training_config.grad_accum_steps * WORLD_SIZE)
+    training_config.samples_per_epoch = math.ceil(samples / (training_config.batch_size * WORLD_SIZE))
+    training_config.updates_per_epoch = math.ceil(training_config.samples_per_epoch / training_config.grad_accum_steps)
     if GLOBAL_RANK == COORDINATOR_RANK:
         numerical_configs = {k: v for k, v in training_config.to_dict().items() if not isinstance(v, str)}
         LOGGER.info(f"Total training samples: {samples}")

@@ -117,6 +117,8 @@ def get_line_count(file_path):
 
 class TrainingConfig(Config):
     def __init__(self, **kwargs):
+        self.samples_per_epoch = None
+        self.updates_per_epoch = None
         self.epochs: int = kwargs.get("epochs", 10)
         self.batch_size: int = kwargs.get("batch_size", 64)
         self.grad_accum_steps: int = kwargs.get("grad_accum_steps", 1)
