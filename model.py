@@ -19,7 +19,6 @@ class Embedding(nn.Module):
 class PositionEncoder(nn.Module):
     def __init__(self, seq_len: int, embed_dim: int, dropout: float):
         super().__init__()
-        self.dropout = nn.Dropout(dropout)
         
         # (SEQ_LEN, 1)
         positions = torch.arange(0, seq_len, dtype=torch.float).unsqueeze(1)
@@ -116,16 +115,13 @@ class FeedForwardBlock(nn.Module):
         super().__init__()
         self.linear1 = nn.Linear(embed_dim, ff_dim)
         self.linear2 = nn.Linear(ff_dim, embed_dim)
-        self.dropout = nn.Dropout(dropout)
         self.gelu = nn.GELU()
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear2(
-            self.dropout(
                 self.gelu(self.linear1(x))
-            )
         )
 
 
@@ -174,7 +170,6 @@ class GPTmodel(nn.Module):
         self.embedding = Embedding(embed_dim, vocab_size)
         self.position_encoder = PositionEncoder(seq_len, embed_dim, dropout)
         self.projection = Projection(embed_dim, vocab_size)
-        self.layer_norm = nn.LayerNorm(embed_dim)
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
@@ -192,7 +187,7 @@ class GPTmodel(nn.Module):
     def _decode(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         for decoder in self.decoders:
             x = decoder(x, mask)
-        return self.layer_norm(x)
+        return x
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, VOCAB_SIZE)

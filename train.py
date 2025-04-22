@@ -334,6 +334,7 @@ if __name__ == "__main__":
         numerical_configs = {k: v for k, v in training_config.to_dict().items() if not isinstance(v, str)}
         LOGGER.info(f"Total training samples: {samples}")
         LOGGER.info(f"Using training config: {numerical_configs}")
+        LOGGER.info(f"Using model config: {model_config}")
         
     os.makedirs(WEIGHTS_DIRECTORY, exist_ok=True)
     tokenizer = SentencePieceProcessor(max_len=model_config.seq_len)
