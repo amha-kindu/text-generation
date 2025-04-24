@@ -46,37 +46,27 @@ class GptInferenceEngine:
             next_token_logits = logits[:, -1, :] / self.temperature
 
             # Apply softmax to get probabilities
-            prob_dist = torch.softmax(next_token_logits, dim=-1)
+            probs = torch.softmax(next_token_logits, dim=-1)
 
-            # Filter the top k tokens based on their probabilities
-            top_k = min(self.top_k, prob_dist.size(-1))
-            top_k_probs, top_k_indices = torch.topk(prob_dist, top_k, dim=-1)
+            # Top-k filtering
+            if self.top_k > 0:
+                top_k_probs, top_k_indices = torch.topk(probs, self.top_k, dim=-1)
+                probs = torch.zeros_like(probs).scatter(-1, top_k_indices, top_k_probs)
 
-            # Sort top_k by descending prob, do top-p within that subset
-            sorted_probs, sorted_indices = torch.sort(top_k_probs, descending=True, dim=-1)
-            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-            mask = (cumulative_probs <= self.top_p)
-
-            # Ensure at least one token is kept: only set the *highest-prob* token true
-            mask[0, 0] = True
-
-            filtered_probs = sorted_probs[mask]
-            filtered_indices = sorted_indices[mask]
-
-            # If top-p filtering zeroed everything (very rare), revert to top_k
-            if filtered_probs.numel() == 0:
-                filtered_probs = top_k_probs[0]
-                filtered_indices = top_k_indices[0]
-            else:
-                # Otherwise, map sorted_indices back to the original top_k_indices:
-                # sorted_indices are indices *within* top_k => we find actual token IDs:
-                filtered_indices = top_k_indices[0, filtered_indices]
+            # Top-p (nucleus) filtering
+            if self.top_p > 0.0:
+                sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
+                cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+                mask = cumulative_probs <= self.top_p
+                
+                mask[..., 0] = True     # Ensure at least one token is selected
+                filtered_probs = torch.where(mask, sorted_probs, torch.zeros_like(sorted_probs))
+                probs = torch.zeros_like(probs).scatter(-1, sorted_indices, filtered_probs)
 
             # Re-normalize probabilities and sample
-            filtered_probs = filtered_probs / filtered_probs.sum()
-            chosen_idx = torch.multinomial(filtered_probs, 1).item()
-            predicted_token = filtered_indices[chosen_idx].item()
-
+            probs = probs / probs.sum()
+            predicted_token = torch.multinomial(probs, 1).item()
+            
             token_ids.append(predicted_token)
 
             yield predicted_token
@@ -84,6 +74,9 @@ class GptInferenceEngine:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train a GPT model")
+    parser.add_argument("--top-k", type=int, default=0, help="Top k tokens to sample from (set to 0 to disable)")
+    parser.add_argument("--top-p", type=float, default=0.0, help="Top p (nucleus) sampling probability (set to 0.0 to disable)")
+    parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature (t=1.0 for normal sampling, 0<t<1.0 for less random, t>1.0 for more random sampling)")
     parser.add_argument("--checkpoint", type=str, required=True, help="File path to load saved weights")
 
     args = parser.parse_args()
@@ -110,7 +103,7 @@ if __name__ == '__main__':
     tokenizer.LoadFromFile(
         f"{WORKING_DIR}/tokenizers/amharic-bpe-tokenizer-{model_config.vocab_size // 1000}k.model"
     )
-    inference_engine = GptInferenceEngine(model, tokenizer, top_k=10, top_p=0.9, temperature=1)
+    inference_engine = GptInferenceEngine(model, tokenizer, top_k=args.top_k, top_p=args.top_p, temperature=args.temperature)
 
     while True:
         user_input = input("Input: ")
