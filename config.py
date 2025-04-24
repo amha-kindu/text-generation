@@ -147,6 +147,11 @@ class TrainingConfig(Config):
 
         if not os.path.isfile(self.testing_data):
             raise FileNotFoundError(f"File '{self.testing_data}' does not exist")
+        
+    def update(self, **kwargs):
+        for key, value in kwargs.items():
+            if value and hasattr(self, key) and value != getattr(DEFAULT_TRAINING_CONFIG, key):
+                setattr(self, key, value)
 
 DEFAULT_TRAINING_CONFIG = TrainingConfig()
 DEFAULT_MODEL_CONFIG = ModelConfig()

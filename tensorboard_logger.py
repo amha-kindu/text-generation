@@ -24,9 +24,9 @@ class TensorboardLogger:
         if self.is_main():
             self.writer.add_scalar(tag, value, step)
 
-    def log_histogram(self, tag, value, step, bins):
+    def log_histogram(self, tag, value, step):
         if self.is_main():
-            self.writer.add_histogram(tag, value, step, bins=bins)
+            self.writer.add_histogram(tag, value, step)
 
     def log_scalars(self, tag, value_dict, step):
         if self.is_main():

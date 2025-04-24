@@ -132,6 +132,8 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
     if state:
         training_state = state["training_state"]
         initial_epoch = training_state["epoch"]
+        if global_step % config.updates_per_epoch == 0:
+            initial_epoch += 1
         global_step = training_state["global_step"]
         training_loss = training_state["training_loss"]
         validation_loss = training_state["validation_loss"]
@@ -243,7 +245,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                     
                     if global_step % 2000 == 0:
                         top5_avg_probs = torch.topk(torch.softmax(logits, dim=-1), k=5, dim=-1)[0].mean(dim=-1).flatten().cpu().detach()
-                        tb_logger.log_histogram("Top-5 Prediction Confidence Distribution", top5_avg_probs.numpy(), global_step, bins=10000)
+                        tb_logger.log_histogram("Top-5 Prediction Confidence Distribution", top5_avg_probs.numpy(), global_step)
                     
                     if global_step and global_step % config.save_every == 0 or i == config.samples_per_epoch - 1:
                         torch.save({
@@ -296,6 +298,7 @@ if __name__ == "__main__":
     parser.add_argument("--dropout", type=float, default=DEFAULT_MODEL_CONFIG.dropout, help="Dropout probability")
     parser.add_argument("--ff-dim", type=int, default=DEFAULT_MODEL_CONFIG.ff_dim, help="Dimensionality of the feed forward layer")
     parser.add_argument("--dist-backend", type=str, default="nccl", help="Distributed backend")
+    parser.add_argument("--tokenizer", type=str, default=os.path.join("tokenizers", f"amharic-bpe-tokenizer-20k.model"), help="The path to the trained tokenizer model")
     parser.add_argument("--resume", default=False, action="store_true", help="Resume training from checkpoint")
     parser.add_argument("--checkpoint", type=str, default=DEFAULT_TRAINING_CONFIG.checkpoint, help="Filename for the model checkpoint")
     parser.add_argument("--validation-samples", type=int, default=DEFAULT_TRAINING_CONFIG.validation_samples, help="Number of samples to use for a single validation run")
@@ -323,8 +326,7 @@ if __name__ == "__main__":
         weights = state["weights"]
         model_config: ModelConfig = state["model_config"]
         training_config: TrainingConfig = state["training_config"]
-        if state["training_state"]["epoch"] >= training_config.epochs:
-            training_config.epochs *= 2
+        training_config.update(**args.__dict__)
         state.pop("weights")
     
     samples = get_line_count(training_config.training_data)
@@ -338,9 +340,7 @@ if __name__ == "__main__":
         
     os.makedirs(WEIGHTS_DIRECTORY, exist_ok=True)
     tokenizer = SentencePieceProcessor(max_len=model_config.seq_len)
-    tokenizer.LoadFromFile(
-        os.path.join(WORKING_DIR, os.path.join("tokenizers", f"amharic-bpe-tokenizer-{model_config.vocab_size // 1000}k.model"))
-    )
+    tokenizer.LoadFromFile(args.tokenizer)
        
     if os.path.getsize(training_config.training_data) > 200 * 1024 * 1024:
         if GLOBAL_RANK == COORDINATOR_RANK:
