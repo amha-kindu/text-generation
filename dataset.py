@@ -4,13 +4,22 @@ from abc import ABC, abstractmethod
 from config import *
 from typing import Iterator
 from preprocessor import AmharicPreprocessor
-from tokenizer import SentencePieceProcessor
+import sentencepiece as spm
 from torch.utils.data import get_worker_info
 from torch.utils.data import Dataset, IterableDataset, DataLoader, Sampler
 
 
+def get_chunks(token_ids, chunk_size, overlap=20):
+    chunks = []
+    step = chunk_size - overlap
+    for i in range(0, len(token_ids) - overlap, step):
+        chunk = token_ids[i : i + chunk_size]
+        chunks.append(chunk)
+    return chunks
+
+
 class IDataset(Dataset, ABC):
-    def __init__(self, file_path: str, tokenizer: SentencePieceProcessor) -> None:
+    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor) -> None:
         self.file_path = file_path
         self.tokenizer = tokenizer
         self.max_len = tokenizer.max_len
@@ -63,7 +72,7 @@ class IDataset(Dataset, ABC):
 
 
 class TextDataset(IDataset):
-    def __init__(self, file_path: str, tokenizer: SentencePieceProcessor) -> None:
+    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor) -> None:
         super().__init__(file_path, tokenizer)
 
         self.texts = []
@@ -91,20 +100,23 @@ class TextDataset(IDataset):
     def __getitem__(self, index) -> Iterator[dict]:
         text = self.texts[index]
         
-        # Preprocess and tokenize
         token_ids = self.tokenizer.Encode(text, out_type=int)
-        decoder_input, target = self.datapoint(token_ids)
+        for chunk in get_chunks(token_ids, self.max_len):
+            if not chunk:
+                continue
+            
+            decoder_input, target = self.datapoint(chunk)
 
-        return {
-            # (SEQ_LEN,)
-            "decoder_input": decoder_input,
+            yield {
+                # (SEQ_LEN,)
+                "decoder_input": decoder_input,
 
-            # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
-            "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
+                # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
+                "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
 
-            # (SEQ_LEN,)
-            "label": target
-        }
+                # (SEQ_LEN,)
+                "label": target
+            }
 
 
 class IStreamDataset(IterableDataset, IDataset):
@@ -121,7 +133,7 @@ class IStreamDataset(IterableDataset, IDataset):
 
 
 class StreamingTextDataset(IStreamDataset):
-    def __init__(self, file_path: str, tokenizer: SentencePieceProcessor) -> None:
+    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor) -> None:
         super().__init__(file_path, tokenizer)
     
     @staticmethod
@@ -158,20 +170,21 @@ class StreamingTextDataset(IStreamDataset):
                 # Parse each line as a separate JSON object
                 text = json.loads(line.strip())
                 
-                # Tokenize text
+                # Tokenize text(split into chunks if text is bigger than max_len)
                 token_ids = self.tokenizer.Encode(text, out_type=int)
-                if not token_ids:
-                    continue
+                for chunk in get_chunks(token_ids, self.max_len):
+                    if not chunk:
+                        continue
 
-                decoder_input, target = self.datapoint(token_ids)
+                    decoder_input, target = self.datapoint(chunk)
 
-                yield {
-                    # (SEQ_LEN,)
-                    "decoder_input": decoder_input,
-                    
-                    # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN) --> (1, 1, SEQ_LEN, SEQ_LEN)
-                    "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
-                    
-                    # (SEQ_LEN,)
-                    "label": target
-                }
+                    yield {
+                        # (SEQ_LEN,)
+                        "decoder_input": decoder_input,
+                        
+                        # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN) --> (1, 1, SEQ_LEN, SEQ_LEN)
+                        "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
+                        
+                        # (SEQ_LEN,)
+                        "label": target
+                    }

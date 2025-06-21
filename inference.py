@@ -5,13 +5,13 @@ import traceback
 from config import *
 from model import GPTmodel
 from typing import Iterator
+import sentencepiece as spm
 from dataset import TextDataset
 from preprocessor import AmharicPreprocessor
-from tokenizer import SentencePieceProcessor
 
 
 class GptInferenceEngine:
-    def __init__(self, model: GPTmodel, tokenizer: SentencePieceProcessor, top_k: int = 50, top_p: float = 0.9, temperature: float = 1.0) -> None:
+    def __init__(self, model: GPTmodel, tokenizer: spm.SentencePieceProcessor, top_k: int = 50, top_p: float = 0.9, temperature: float = 1.0) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.top_k = top_k
@@ -77,14 +77,14 @@ if __name__ == '__main__':
     parser.add_argument("--top-k", type=int, default=0, help="Top k tokens to sample from (set to 0 to disable)")
     parser.add_argument("--top-p", type=float, default=0.0, help="Top p (nucleus) sampling probability (set to 0.0 to disable)")
     parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature (t=1.0 for normal sampling, 0<t<1.0 for less random, t>1.0 for more random sampling)")
-    parser.add_argument("--checkpoint", type=str, required=True, help="File path to load saved weights")
+    parser.add_argument("--checkpoint", type=str, required=True, help="File path to load saved checkpoint")
 
     args = parser.parse_args()
 
     if not os.path.exists(args.checkpoint) and not os.path.isfile(args.checkpoint):
         raise FileNotFoundError(f"File {args.checkpoint} does not exist")
     
-    LOGGER.info(f"Preloading model weights {args.checkpoint}...")
+    LOGGER.info(f"Loading checkpoint from {args.checkpoint}...")
     checkpoint: dict = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
 
     model_config: ModelConfig = checkpoint["model_config"]
@@ -99,7 +99,7 @@ if __name__ == '__main__':
     LOGGER.info(f"Model Size(MB): {total_params * 4 / (1024 ** 2):.2f}MB")
     LOGGER.info(f"Initiating inference with {'mixed-precision' if MIXED_PRECISION_ENABLED else 'single-precision'}...")
     
-    tokenizer = SentencePieceProcessor(model_config.seq_len)
+    tokenizer = spm.SentencePieceProcessor()
     tokenizer.LoadFromFile(
         f"{WORKING_DIR}/tokenizers/amharic-bpe-tokenizer-{model_config.vocab_size // 1000}k.model"
     )

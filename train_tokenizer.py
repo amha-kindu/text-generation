@@ -53,9 +53,10 @@ if __name__ == "__main__":
         sentence_iterator=iterator,
         model_prefix=os.path.join('tokenizers', f"amharic-bpe-tokenizer-{args.vocab_size // 1000}k"),
         vocab_size=args.vocab_size,
-        character_coverage=1.0,
+        character_coverage=0.9,
         model_type='bpe',
         unk_id=0, pad_id=1, bos_id=2, eos_id=3,
+        user_defined_symbols='[USER],[BOT],[CONTEXT]',
         unk_piece='[UNK]', pad_piece='[PAD]', bos_piece='[SOS]', eos_piece='[EOS]',
         allow_whitespace_only_pieces= True,
         train_extremely_large_corpus=True

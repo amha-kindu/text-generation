@@ -1,70 +1,51 @@
-from preprocessor import AmharicPreprocessor
-from datasets import load_dataset
-import json
 import os
+import json
+import argparse
+from datasets import load_dataset
 
-# Define base directory and paths for each split
-base_dir = "pretraining-corpus"
-os.makedirs(base_dir, exist_ok=True)
 
-# Dictionary to map splits to their file paths
-split_paths = {
-    "train": os.path.join(base_dir, "train.jsonl"),
-    # "test": os.path.join(base_dir, "test2.jsonl"),
-    # "validation": os.path.join(base_dir, "validation.jsonl")
-}
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Retrieve data from huggingface datasets")
+    parser.add_argument("--dataset", type=str, required=True, help="Name of the dataset to retrieve")
+    parser.add_argument("--type", type=str, default="pretraining", help="Whether the dataset is for pretraining or finetuning", choices=["pretraining", "finetuning"])
+    parser.add_argument("--subset", type=str, default=None, help="Subset of the dataset to retrieve(usually one for each language)")
+    parser.add_argument("--split", type=str, default="train", help="Split of the dataset to retrieve")
+    parser.add_argument("--min-length", type=int, default=128, help="Minimum character length for filtering")
+    parser.add_argument("--keys", type=str, default="text", help="Comma-separated list of keys to retrieve")
+    args = parser.parse_args()
 
-# Target size for the subset (5GB = 5,242,880,000 bytes)
-target_size_bytes = 5_242_880_000  # 5GB in bytes
-min_char_length = 128  # Minimum character length for filtering
+    dir = os.path.join("data", args.type, f"{args.dataset.replace('/', '-')}")
+    os.makedirs(dir, exist_ok=True)
+    file_path = os.path.join(dir, f"{args.split}.jsonl")
 
-# Initialize preprocessor (replace with your actual initialization)
-preprocessor = AmharicPreprocessor()
-
-# Load and save each split
-for split_name, file_path in split_paths.items():
-    # Load the dataset in streaming mode for the current split
-    ds = load_dataset("yordanoswuletaw/amharic-pretraining-corpus", split=split_name, streaming=True)
+    ds = load_dataset(args.dataset, args.subset, split=args.split, streaming=True)
+    print(f"Processing {args.split} split of {args.dataset} dataset...")
     
-    print(f"Processing {split_name} split...")
-    total_bytes_written = 0
     example_count = 0
     filtered_count = 0
+    total_bytes_written = 0
 
-    # Open file in append mode and write each string as a JSON line
     with open(file_path, "w", encoding="utf-8") as f:
         for example in ds:
-            # Assuming the dataset has a 'text' field (adjust key if different)
-            text = example.get("text", "")
+            text = ""
+            for key in example:
+                if key in args.keys.split(","):
+                    if text:
+                        text += "\n\n"
+                    text += example.get(key, "")
             
-            # Apply preprocessing
-            text = preprocessor.execute(text)
-            
-            # Filter based on character length
-            if text and len(text) >= min_char_length:
-                # Write the preprocessed string as a JSON line
+            if text and len(text) >= args.min_length:
                 json.dump(text, f, ensure_ascii=False)
-                f.write("\n")  # Add newline for JSONL format
+                f.write("\n")
                 filtered_count += 1
-                
-                # Update total bytes written (size of the JSON string)
-                example_size = len(json.dumps(text, ensure_ascii=False).encode("utf-8")) + 1  # +1 for newline
-                total_bytes_written += example_size
-                
-                # Stop when we reach ~5GB
-                # if total_bytes_written >= target_size_bytes:
-                #     break
+            example_size = len(json.dumps(text, ensure_ascii=False).encode("utf-8")) + 1
+            total_bytes_written += example_size
 
             example_count += 1
-
-            # Print feedback every 1,000,000 samples retrieved
             if example_count % 1_000_000 == 0:
                 size_mb = total_bytes_written / (1024 * 1024)
                 print(f"  Processed {example_count:,} samples, Filtered {filtered_count:,} saved, ~{size_mb:.2f} MB")
 
-    # Final report for this split
-    final_size_mb = total_bytes_written / (1024 * 1024)
-    print(f"Saved {filtered_count:,} filtered strings (out of {example_count:,} total) of {split_name} split to {file_path}")
-    print(f"Total size: {final_size_mb:.2f} MB")
+    print(f"Saved {filtered_count:,} filtered strings (out of {example_count:,} total) of {args.split} split of {args.dataset} dataset to {file_path}")
+    print(f"Total size: {total_bytes_written / (1024 * 1024):.2f} MB")
 
-print("Processing complete.")

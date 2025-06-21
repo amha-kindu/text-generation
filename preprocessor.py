@@ -1,7 +1,5 @@
 import re
 from abc import ABC, abstractmethod
-from tokenizer import SentencePieceProcessor
-
 
 class PreprocessingPipeline(ABC):   
     def __init__(self) -> None:
@@ -15,8 +13,8 @@ class PreprocessingPipeline(ABC):
 class AmharicPreprocessor(PreprocessingPipeline):
     def __init__(self) -> None:
         super().__init__()
-        self.extra_whitespace = re.compile(r'\s{2,}')
-        self.non_amharic_chars = re.compile(r'[^\u1200-\u137F0-9\s\'\"!@#$%*()_\-+=[\]{}|\\:;?./]')
+        # self.extra_whitespace = re.compile(r'\s{2,}')
+        # self.non_amharic_chars = re.compile(r'[^\u1200-\u137F0-9\s\'\"!@#$%*()_\-+=[\]{}|\\:;?./]')
         self.normalization_patterns = [
             (re.compile('[ሃኅኃሐሓኻ]'), 'ሀ'),
             (re.compile('[ሑኁዅ]'), 'ሁ'),
@@ -76,13 +74,12 @@ class AmharicPreprocessor(PreprocessingPipeline):
         text = text.strip()
 
         # Remove non-amharic character except for arabic numerals and some punctuations
-        text = self.non_amharic_chars.sub('', text)
+        # text = self.non_amharic_chars.sub('', text)
 
         # Character level mismatch
         text = self.normalize_char_level_missmatch(text)
 
-        # Remove extra whitespace and return
-        return self.extra_whitespace.sub(' ', text)
+        return text
 
     def normalize_char_level_missmatch(self, text: str) -> str:
         for pattern, replacement in self.normalization_patterns:

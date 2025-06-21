@@ -6,9 +6,9 @@ from config import *
 import torch.nn as nn
 from tqdm import tqdm
 from model import GPTmodel
+import sentencepiece as spm
 from datetime import datetime
 import torch.distributed as dist
-from tokenizer import SentencePieceProcessor
 from tensorboard_logger import TensorboardLogger
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, RandomSampler
@@ -300,7 +300,7 @@ if __name__ == "__main__":
     parser.add_argument("--dist-backend", type=str, default="nccl", help="Distributed backend")
     parser.add_argument("--tokenizer", type=str, default=os.path.join("tokenizers", f"amharic-bpe-tokenizer-20k.model"), help="The path to the trained tokenizer model")
     parser.add_argument("--resume", default=False, action="store_true", help="Resume training from checkpoint")
-    parser.add_argument("--checkpoint", type=str, default=DEFAULT_TRAINING_CONFIG.checkpoint, help="Filename for the model checkpoint")
+    parser.add_argument("--checkpoint", type=str, default=DEFAULT_TRAINING_CONFIG.checkpoint, help="Path to checkpoint")
     parser.add_argument("--validation-samples", type=int, default=DEFAULT_TRAINING_CONFIG.validation_samples, help="Number of samples to use for a single validation run")
 
     args = parser.parse_args()
@@ -321,7 +321,7 @@ if __name__ == "__main__":
         if not os.path.exists(args.checkpoint):
             raise FileNotFoundError(f"File {args.checkpoint} does not exist")
 
-        LOGGER.info(f"Preloading model weights from '{args.checkpoint}'...")
+        LOGGER.info(f"Loading checkpoint from '{args.checkpoint}'...")
         state: dict = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
         weights = state["weights"]
         model_config: ModelConfig = state["model_config"]
@@ -338,8 +338,8 @@ if __name__ == "__main__":
         LOGGER.info(f"Using training config: {numerical_configs}")
         LOGGER.info(f"Using model config: {model_config}")
         
-    os.makedirs(WEIGHTS_DIRECTORY, exist_ok=True)
-    tokenizer = SentencePieceProcessor(max_len=model_config.seq_len)
+    os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
+    tokenizer = spm.SentencePieceProcessor()
     tokenizer.LoadFromFile(args.tokenizer)
        
     if os.path.getsize(training_config.training_data) > 200 * 1024 * 1024:

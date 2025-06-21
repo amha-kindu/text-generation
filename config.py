@@ -36,7 +36,7 @@ LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
 WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
 LOCAL_WORLD_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", "1"))
 WORKING_DIR = os.path.dirname(os.path.realpath(__file__))
-WEIGHTS_DIRECTORY = os.path.join(WORKING_DIR, "weights")
+CHECKPOINTS_DIR = os.path.join(WORKING_DIR, "checkpoints")
 
 DEVICE = torch.device('cpu')
 MIXED_PRECISION_ENABLED = False
@@ -135,9 +135,9 @@ class TrainingConfig(Config):
         self.save_every: int = kwargs.get("save_every", 1000)
         self.validate_every: int = kwargs.get("validate_every", 100)
         self.validation_samples: int = kwargs.get("validation_samples", 20)
-        self.training_data: str = kwargs.get("training_data", os.path.join(WORKING_DIR, "pretraining-corpus", "train.jsonl"))
-        self.validation_data: str = kwargs.get("validation_data", os.path.join(WORKING_DIR, "pretraining-corpus", "val.jsonl"))
-        self.testing_data: str = kwargs.get("testing_data", os.path.join(WORKING_DIR, "pretraining-corpus", "test.jsonl"))
+        self.training_data: str = kwargs.get("training_data", os.path.join(WORKING_DIR, "data", "pretraining", "train.jsonl"))
+        self.validation_data: str = kwargs.get("validation_data", os.path.join(WORKING_DIR, "data", "pretraining", "val.jsonl"))
+        self.testing_data: str = kwargs.get("testing_data", os.path.join(WORKING_DIR, "data", "pretraining", "test.jsonl"))
         
         if not os.path.isfile(self.training_data):
             raise FileNotFoundError(f"File '{self.training_data}' does not exist")
@@ -155,3 +155,27 @@ class TrainingConfig(Config):
 
 DEFAULT_TRAINING_CONFIG = TrainingConfig()
 DEFAULT_MODEL_CONFIG = ModelConfig()
+
+if __name__ == '__main__':
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Check a model training checkpoint")
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint")
+
+    args = parser.parse_args()
+
+    if not os.path.exists(args.checkpoint) and not os.path.isfile(args.checkpoint):
+        raise FileNotFoundError(f"File {args.checkpoint} does not exist")
+    
+    LOGGER.info(f"Loading checkpoint from '{args.checkpoint}'...")
+    checkpoint: dict = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
+
+    model_config: ModelConfig = checkpoint["model_config"]
+    training_config: TrainingConfig = checkpoint["training_config"]
+    training_state: dict = checkpoint["training_state"]
+    
+    training_state = {k: v for k, v in training_state.items() if k not in ["optimizer_state", "lr_scheduler_state"]}
+    
+    LOGGER.info(f"Model config: {model_config}")
+    LOGGER.info(f"Training config: {training_config}")
+    LOGGER.info(f"Training state: {training_state}")
