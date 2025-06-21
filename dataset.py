@@ -19,10 +19,10 @@ def get_chunks(token_ids, chunk_size, overlap=20):
 
 
 class IDataset(Dataset, ABC):
-    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor) -> None:
+    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int) -> None:
         self.file_path = file_path
         self.tokenizer = tokenizer
-        self.max_len = tokenizer.max_len
+        self.max_len = max_len
 
         self.pad_token = torch.tensor([self.tokenizer.pad_id()], dtype=torch.int64)
         self.eos_token = torch.tensor([self.tokenizer.eos_id()], dtype=torch.int64)
@@ -72,8 +72,8 @@ class IDataset(Dataset, ABC):
 
 
 class TextDataset(IDataset):
-    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor) -> None:
-        super().__init__(file_path, tokenizer)
+    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int) -> None:
+        super().__init__(file_path, tokenizer, max_len)
 
         self.texts = []
         self.file = open(file_path, 'r', encoding='utf-8')
@@ -133,8 +133,8 @@ class IStreamDataset(IterableDataset, IDataset):
 
 
 class StreamingTextDataset(IStreamDataset):
-    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor) -> None:
-        super().__init__(file_path, tokenizer)
+    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int) -> None:
+        super().__init__(file_path, tokenizer, max_len)
     
     @staticmethod
     def collate_fn(batch):

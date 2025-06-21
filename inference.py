@@ -29,7 +29,7 @@ class GptInferenceEngine:
         token_ids: list[int] = self.tokenizer.Encode(text, out_type=int)
 
         predicted_token = None
-        while token_ids and len(token_ids) < self.tokenizer.max_len and predicted_token != self.eos_id:
+        while token_ids and len(token_ids) < self.model.config.seq_len and predicted_token != self.eos_id:
             decoder_input = torch.tensor(
                 token_ids,
                 dtype=torch.int64

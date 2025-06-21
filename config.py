@@ -135,17 +135,17 @@ class TrainingConfig(Config):
         self.save_every: int = kwargs.get("save_every", 1000)
         self.validate_every: int = kwargs.get("validate_every", 100)
         self.validation_samples: int = kwargs.get("validation_samples", 20)
-        self.training_data: str = kwargs.get("training_data", os.path.join(WORKING_DIR, "data", "pretraining", "train.jsonl"))
-        self.validation_data: str = kwargs.get("validation_data", os.path.join(WORKING_DIR, "data", "pretraining", "val.jsonl"))
-        self.testing_data: str = kwargs.get("testing_data", os.path.join(WORKING_DIR, "data", "pretraining", "test.jsonl"))
+        self.training_data: str = kwargs.get("training_data", None)
+        self.validation_data: str = kwargs.get("validation_data", None)
+        self.testing_data: str = kwargs.get("testing_data", None)
         
-        if not os.path.isfile(self.training_data):
+        if self.training_data and not os.path.isfile(self.training_data):
             raise FileNotFoundError(f"File '{self.training_data}' does not exist")
         
-        if not os.path.isfile(self.validation_data):
+        if self.validation_data and not os.path.isfile(self.validation_data):
             raise FileNotFoundError(f"File '{self.validation_data}' does not exist")
 
-        if not os.path.isfile(self.testing_data):
+        if self.testing_data and not os.path.isfile(self.testing_data):
             raise FileNotFoundError(f"File '{self.testing_data}' does not exist")
         
     def update(self, **kwargs):

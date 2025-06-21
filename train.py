@@ -345,18 +345,18 @@ if __name__ == "__main__":
     if os.path.getsize(training_config.training_data) > 200 * 1024 * 1024:
         if GLOBAL_RANK == COORDINATOR_RANK:
             LOGGER.info(f"File '{os.path.basename(training_config.training_data)}' too large! streaming file...")
-        train_dataset = StreamingTextDataset(training_config.training_data, tokenizer)
+        train_dataset = StreamingTextDataset(training_config.training_data, tokenizer, model_config.seq_len)
     else:
-        train_dataset = TextDataset(training_config.training_data, tokenizer)
+        train_dataset = TextDataset(training_config.training_data, tokenizer, model_config.seq_len)
     
     if os.path.getsize(training_config.testing_data) > 200 * 1024 * 1024:
         if GLOBAL_RANK == COORDINATOR_RANK:
             LOGGER.info(f"File '{os.path.basename(training_config.testing_data)}' too large! streaming file...")
-        test_dataset = StreamingTextDataset(training_config.testing_data, tokenizer)
+        test_dataset = StreamingTextDataset(training_config.testing_data, tokenizer, model_config.seq_len)
     else:
-        test_dataset = TextDataset(training_config.testing_data, tokenizer)
+        test_dataset = TextDataset(training_config.testing_data, tokenizer, model_config.seq_len)
 
-    val_dataset = TextDataset(training_config.validation_data, tokenizer)
+    val_dataset = TextDataset(training_config.validation_data, tokenizer, model_config.seq_len)
 
     model = GPTmodel.build(model_config, weights).to(DEVICE)
     
