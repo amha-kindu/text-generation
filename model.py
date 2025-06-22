@@ -128,8 +128,8 @@ class FeedForwardBlock(nn.Module):
 class DecoderBlock(nn.Module):
     def __init__(self, embed_dim: int, ff_dim: int, dropout: float, heads: int):
         super().__init__()
-        self.ln1 = nn.LayerNorm(embed_dim)
-        self.ln2 = nn.LayerNorm(embed_dim)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
         self.masked_multihead_attention = MultiHeadAttentionBlock(embed_dim, dropout, heads)
         self.feed_forward = FeedForwardBlock(embed_dim, ff_dim, dropout)
         self.dropout = nn.Dropout(dropout)
@@ -137,8 +137,8 @@ class DecoderBlock(nn.Module):
     # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
     def forward(self, x: torch.Tensor, mask: torch.Tensor):
-        x = x + self.dropout(self.masked_multihead_attention(self.ln1(x), self.ln1(x), self.ln1(x), mask))
-        x = x + self.dropout(self.feed_forward(self.ln2(x)))
+        x = x + self.dropout(self.norm1(self.masked_multihead_attention(x, x, x, mask)))
+        x = x + self.dropout(self.norm2(self.feed_forward(x)))
         return x
 
 
@@ -170,7 +170,6 @@ class GPTmodel(nn.Module):
         self.embedding = Embedding(embed_dim, vocab_size)
         self.position_encoder = PositionEncoder(seq_len, embed_dim, dropout)
         self.projection = Projection(embed_dim, vocab_size)
-        self.layer_norm = nn.LayerNorm(embed_dim)
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
@@ -188,7 +187,7 @@ class GPTmodel(nn.Module):
     def _decode(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         for decoder in self.decoders:
             x = decoder(x, mask)
-        return self.layer_norm(x)
+        return x
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, VOCAB_SIZE)

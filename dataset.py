@@ -9,15 +9,6 @@ from torch.utils.data import get_worker_info
 from torch.utils.data import Dataset, IterableDataset, DataLoader, Sampler
 
 
-def get_chunks(token_ids, chunk_size, overlap=20):
-    chunks = []
-    step = chunk_size - overlap
-    for i in range(0, len(token_ids) - overlap, step):
-        chunk = token_ids[i : i + chunk_size]
-        chunks.append(chunk)
-    return chunks
-
-
 class IDataset(Dataset, ABC):
     def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int) -> None:
         self.file_path = file_path
@@ -45,12 +36,15 @@ class IDataset(Dataset, ABC):
         raise NotImplementedError("Subclass must implement the 'batch_iterator' abstractmethod!")
     
     def datapoint(self, token_ids: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
-        padding = self.max_len - len(token_ids)
+        # Sample:   A B C D E $ $ $
+        # Input:    A B C D $ $ $ $
+        # Target:   B C D E $ $ $ $
+        padding = self.max_len - len(token_ids) + 1
         
         # (SEQ_LEN,)
         decoder_input: torch.Tensor = torch.concat([
-            # (len(token_ids),)
-            torch.tensor(token_ids, dtype=torch.int64),
+            # (len(token_ids) - 1,)
+            torch.tensor(token_ids[:-1], dtype=torch.int64),
             
             # (padding,)
             torch.tensor([self.pad_token] * padding, dtype=torch.int64)
@@ -61,11 +55,8 @@ class IDataset(Dataset, ABC):
             # (len(token_ids) - 1,)
             torch.tensor(token_ids[1:], dtype=torch.int64),
             
-            # (1,)
-            torch.tensor([self.eos_token], dtype=torch.int64),
-            
             # (padding,)
-            torch.tensor([self.pad_token] * padding, dtype=torch.int64)
+            torch.tensor([self.pad_token] * (padding + 1), dtype=torch.int64)
         ])[:self.max_len]
         
         return decoder_input, target
@@ -97,26 +88,24 @@ class TextDataset(IDataset):
     def batch_iterator(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
         return DataLoader(self, batch_size, shuffle=(sampler is None), sampler=sampler)
 
-    def __getitem__(self, index) -> Iterator[dict]:
+    def __getitem__(self, index) -> dict:
         text = self.texts[index]
         
         token_ids = self.tokenizer.Encode(text, out_type=int)
-        for chunk in get_chunks(token_ids, self.max_len):
-            if not chunk:
-                continue
-            
-            decoder_input, target = self.datapoint(chunk)
+        token_ids = token_ids[:self.max_len]
+        
+        decoder_input, target = self.datapoint(token_ids)
 
-            yield {
-                # (SEQ_LEN,)
-                "decoder_input": decoder_input,
+        return {
+            # (SEQ_LEN,)
+            "decoder_input": decoder_input,
 
-                # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
-                "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
+            # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
+            "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
 
-                # (SEQ_LEN,)
-                "label": target
-            }
+            # (SEQ_LEN,)
+            "label": target
+        }
 
 
 class IStreamDataset(IterableDataset, IDataset):
@@ -172,19 +161,17 @@ class StreamingTextDataset(IStreamDataset):
                 
                 # Tokenize text(split into chunks if text is bigger than max_len)
                 token_ids = self.tokenizer.Encode(text, out_type=int)
-                for chunk in get_chunks(token_ids, self.max_len):
-                    if not chunk:
-                        continue
+                token_ids = token_ids[:self.max_len]
+                
+                decoder_input, target = self.datapoint(token_ids)
 
-                    decoder_input, target = self.datapoint(chunk)
-
-                    yield {
-                        # (SEQ_LEN,)
-                        "decoder_input": decoder_input,
-                        
-                        # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN) --> (1, 1, SEQ_LEN, SEQ_LEN)
-                        "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
-                        
-                        # (SEQ_LEN,)
-                        "label": target
-                    }
+                yield {
+                    # (SEQ_LEN,)
+                    "decoder_input": decoder_input,
+                    
+                    # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN) --> (1, 1, SEQ_LEN, SEQ_LEN)
+                    "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
+                    
+                    # (SEQ_LEN,)
+                    "label": target
+                }
