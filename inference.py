@@ -1,124 +1,124 @@
-import sys
+import time
 import torch
+import argparse
+import traceback
 from config import *
-from PyQt5.QtGui import QFont
 from model import GPTmodel
+from typing import Iterator
 import sentencepiece as spm
+from dataset import TextDataset
 from preprocessor import AmharicPreprocessor
-from train import get_tokenizer
-from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGridLayout
 
 
 class GptInferenceEngine:
-
-    def __init__(self, model: GPTmodel, tokenizer: spm.SentencePieceProcessor, top_k: int= 5, nucleus_threshold=10) -> None:
+    def __init__(self, model: GPTmodel, tokenizer: spm.SentencePieceProcessor, top_k: int = 50, top_p: float = 0.9, temperature: float = 1.0) -> None:
         self.model = model
-        self.top_k = top_k
         self.tokenizer = tokenizer
-        self.nucleus_threshold = nucleus_threshold
+        self.top_k = top_k
+        self.top_p = top_p
+        self.temperature = temperature
         self.pad_id = self.tokenizer.pad_id()
         self.eos_id = self.tokenizer.eos_id()
-        self.preprocessor = AmharicPreprocessor(tokenizer)
+        self.preprocessor = AmharicPreprocessor()
 
         self.model.eval()
 
     @torch.no_grad()
-    def complete(self, text: str, max_len: int) -> str:
-        token_ids = self.preprocessor.preprocess(text)
-        padding = SEQ_LEN - len(token_ids)
-
-        # (1, SEQ_LEN)
-        decoder_input = torch.concat([
-            torch.tensor(token_ids, dtype=torch.int64),
-            torch.tensor([self.pad_id] * padding, dtype=torch.int64)
-        ]).unsqueeze(0).to(LOCAL_RANK)
+    def complete(self, text: str) -> Iterator[int]:
+        text = self.preprocessor.execute(text)
+        token_ids: list[int] = self.tokenizer.Encode(text, out_type=int)
 
         predicted_token = None
-        non_pad_tokens = len(token_ids)
-        while non_pad_tokens > 0 and non_pad_tokens < max_len and predicted_token != self.eos_id:
-            # (1, SEQ_LEN, VOCAB_SIZE)
-            logits = self.model(decoder_input)
+        while token_ids and len(token_ids) < self.model.config.seq_len and predicted_token != self.eos_id:
+            decoder_input = torch.tensor(
+                token_ids,
+                dtype=torch.int64
+            ).to(DEVICE).unsqueeze(0)
+                        
+            decoder_mask = TextDataset.lookback_mask(len(token_ids)).to(DEVICE)
+            
+            with torch.autocast(device_type=DEVICE.type, enabled=MIXED_PRECISION_ENABLED):
+                # (1, SEQ_LEN, VOCAB_SIZE)
+                logits = self.model(decoder_input, decoder_mask)
 
             # (1, VOCAB_SIZE)
-            next_token_logits = logits[:, non_pad_tokens - 1]
+            # Take logits for the last position and apply temperature scaling
+            next_token_logits = logits[:, -1, :] / self.temperature
 
-            # Evaluate the probability distribution across the VOCAB_SIZE
-            # dimension using softmax - (1, VOCAB_SIZE)
-            probab_distribution = torch.softmax(next_token_logits, dim=1)
+            # Apply softmax to get probabilities
+            probs = torch.softmax(next_token_logits, dim=-1)
 
-            # Greedily pick the token with the highest probability
-            _, predicted_token = torch.max(probab_distribution, dim=1)
+            # Top-k filtering
+            if self.top_k > 0:
+                top_k_probs, top_k_indices = torch.topk(probs, self.top_k, dim=-1)
+                probs = torch.zeros_like(probs).scatter(-1, top_k_indices, top_k_probs)
 
-            # Add the predicted token to the decoder input for the subsequent iterations
-            decoder_input[:, non_pad_tokens] = predicted_token.item()
+            # Top-p (nucleus) filtering
+            if self.top_p > 0.0:
+                sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
+                cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+                mask = cumulative_probs <= self.top_p
+                
+                mask[..., 0] = True     # Ensure at least one token is selected
+                filtered_probs = torch.where(mask, sorted_probs, torch.zeros_like(sorted_probs))
+                probs = torch.zeros_like(probs).scatter(-1, sorted_indices, filtered_probs)
 
-            non_pad_tokens += 1
+            # Re-normalize probabilities and sample
+            probs = probs / probs.sum()
+            predicted_token = torch.multinomial(probs, 1).item()
+            
+            token_ids.append(predicted_token)
 
-        # Remove the batch dimension
-        # (1, SEQ_LEN) ---> (SEQ_LEN,)
-        decoder_input = decoder_input.squeeze(0)
+            yield predicted_token
 
-        return self.tokenizer.Decode(decoder_input.detach().cpu().tolist())
-
-
-class TranslationApp(QWidget):
-    def __init__(self, inference_engine: GptInferenceEngine):
-        super().__init__()
-        self.init_ui()
-        self.inference_engine = inference_engine
-
-    def init_ui(self):
-        self.setWindowTitle('Translation App')
-        self.setGeometry(100, 100, 600, 400)
-
-        self.input_label = QLabel('Input(English):')
-        self.input_label.setFont(QFont('Arial', 12))  
-        self.input_textbox = QLineEdit(self)
-        self.input_textbox.setFont(QFont('Nyala', 14))  
-        self.input_textbox
-        self.input_textbox.returnPressed.connect(self.on_translate_button_clicked)
-
-        self.output_label = QLabel('Output(Amharic):')
-        self.output_label.setFont(QFont('Arial', 12))  
-        self.output_textbox = QLineEdit(self)
-        self.output_textbox.setReadOnly(True)
-        self.output_textbox.setFont(QFont('Nyala', 14)) 
-
-        self.translate_button = QPushButton('Translate', self)
-        self.translate_button.setFont(QFont('Arial', 12))
-        self.translate_button.setFixedWidth(self.width() // 2)
-        self.translate_button.clicked.connect(self.on_translate_button_clicked)
-
-        layout = QGridLayout()
-        layout.addWidget(self.input_label, 0, 0)
-        layout.addWidget(self.input_textbox, 0, 1)
-        layout.addWidget(self.output_label, 1, 0)
-        layout.addWidget(self.output_textbox, 1, 1)
-        layout.addWidget(self.translate_button, 2, 1, 1, 2)
-
-        self.setLayout(layout)
-
-    def on_translate_button_clicked(self):
-        input_text = self.input_textbox.text()
-        prediction: str = self.inference_engine.translate(input_text, 10)
-        self.output_textbox.setText(prediction)
 
 if __name__ == '__main__':
-    app = QApplication(sys.argv)
+    parser = argparse.ArgumentParser(description="Train a GPT model")
+    parser.add_argument("--top-k", type=int, default=0, help="Top k tokens to sample from (set to 0 to disable)")
+    parser.add_argument("--top-p", type=float, default=0.0, help="Top p (nucleus) sampling probability (set to 0.0 to disable)")
+    parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature (t=1.0 for normal sampling, 0<t<1.0 for less random, t>1.0 for more random sampling)")
+    parser.add_argument("--checkpoint", type=str, required=True, help="File path to load saved checkpoint")
 
-    state = torch.load("./models/tmodel-en-am-v1-20k.pt", map_location=LOCAL_RANK)
-    model = GPTmodel.build(VOCAB_SIZE, state).to(LOCAL_RANK)
+    args = parser.parse_args()
+
+    if not os.path.exists(args.checkpoint) and not os.path.isfile(args.checkpoint):
+        raise FileNotFoundError(f"File {args.checkpoint} does not exist")
+    
+    LOGGER.info(f"Loading checkpoint from {args.checkpoint}...")
+    checkpoint: dict = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
+
+    model_config: ModelConfig = checkpoint["model_config"]
+
+    model = GPTmodel.build(model_config, checkpoint["weights"]).to(DEVICE)
 
     model.eval()
     total_params = sum(p.numel() for p in model.parameters())
-    LOGGER.info(f"Device: {LOCAL_RANK}")
+    LOGGER.info(f"Device: {DEVICE}")
     LOGGER.info(f"Total Parameters: {total_params}")
     LOGGER.info(f"Trainable Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     LOGGER.info(f"Model Size(MB): {total_params * 4 / (1024 ** 2):.2f}MB")
+    LOGGER.info(f"Initiating inference with {'mixed-precision' if MIXED_PRECISION_ENABLED else 'single-precision'}...")
     
-    tokenizer: spm.SentencePieceProcessor = get_tokenizer()
-    inference_engine = GptInferenceEngine(model, tokenizer)
+    tokenizer = spm.SentencePieceProcessor()
+    tokenizer.LoadFromFile(
+        f"{WORKING_DIR}/tokenizers/amharic-bpe-tokenizer-{model_config.vocab_size // 1000}k.model"
+    )
+    inference_engine = GptInferenceEngine(model, tokenizer, top_k=args.top_k, top_p=args.top_p, temperature=args.temperature)
 
-    translation_app = TranslationApp(inference_engine)
-    translation_app.show()
-    sys.exit(app.exec_())
+    while True:
+        user_input = input("Input: ")
+        if user_input.lower() == 'exit':
+            LOGGER.info("Exiting the program.")
+            break
+
+        try:
+            LOGGER.info(f"Response: {user_input}", extra={"partial": True})
+            for token_id in inference_engine.complete(user_input):
+                if token_id != tokenizer.eos_id():
+                    token: str = tokenizer.IdToPiece(token_id)
+                    LOGGER.info(token.replace("▁", " "), extra={"partial": True})
+                    time.sleep(0.05)
+            print()
+        except Exception as e:
+            traceback.print_exc()
+            LOGGER.error(f"Error during inference: {e}")

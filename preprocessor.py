@@ -1,22 +1,20 @@
 import re
-import sentencepiece as spm
 from abc import ABC, abstractmethod
 
-
 class PreprocessingPipeline(ABC):   
-    def __init__(self, tokenizer: spm.SentencePieceProcessor) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.tokenizer = tokenizer
     
     @abstractmethod
-    def preprocess(self, text: str, encode=True) -> str:
+    def execute(self, text: str) -> str:
         pass
 
     
 class AmharicPreprocessor(PreprocessingPipeline):
-    def __init__(self, tokenizer: spm.SentencePieceProcessor) -> None:
-        super().__init__(tokenizer)
-        self.extra_whitespace = re.compile(r'\s{2,}')
+    def __init__(self) -> None:
+        super().__init__()
+        # self.extra_whitespace = re.compile(r'\s{2,}')
+        # self.non_amharic_chars = re.compile(r'[^\u1200-\u137F0-9\s\'\"!@#$%*()_\-+=[\]{}|\\:;?./]')
         self.normalization_patterns = [
             (re.compile('[ሃኅኃሐሓኻ]'), 'ሀ'),
             (re.compile('[ሑኁዅ]'), 'ሁ'),
@@ -68,23 +66,20 @@ class AmharicPreprocessor(PreprocessingPipeline):
             (re.compile('[ኵ]'), 'ኩ')
         ]
     
-    def preprocess(self, text: str, encode=True) -> str:
+    def execute(self, text: str) -> str:
+        if not text:
+            return text
+
         # Remove leading and trailing spaces
         text = text.strip()
+
+        # Remove non-amharic character except for arabic numerals and some punctuations
+        # text = self.non_amharic_chars.sub('', text)
 
         # Character level mismatch
         text = self.normalize_char_level_missmatch(text)
 
-        # Remove extra whitespace
-        text = self.extra_whitespace.sub(' ', text)
-        
-        if encode:
-            return self.tokenizer.Encode(
-                text,
-                out_type=int
-            )
-        else:
-            return text
+        return text
 
     def normalize_char_level_missmatch(self, text: str) -> str:
         for pattern, replacement in self.normalization_patterns:
