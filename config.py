@@ -117,12 +117,14 @@ def get_line_count(file_path):
 
 class TrainingConfig(Config):
     def __init__(self, **kwargs):
+        kwargs = { k: v for k, v in kwargs.items() if v is not None}
         self.samples_per_epoch = None
         self.updates_per_epoch = None
         self.epochs: int = kwargs.get("epochs", 10)
         self.batch_size: int = kwargs.get("batch_size", 64)
         self.grad_accum_steps: int = kwargs.get("grad_accum_steps", 1)
         self.init_lr: float = kwargs.get("init_lr", 2e-04)
+        self.final_lr: float = kwargs.get("final_lr", 0)
         self.weight_decay: float = kwargs.get("weight_decay", 0.01)
         self.max_norm: float = kwargs.get("max_norm", 1.0)
         self.ema_alpha: float = kwargs.get("ema_alpha", 0.9)
@@ -150,7 +152,7 @@ class TrainingConfig(Config):
         
     def update(self, **kwargs):
         for key, value in kwargs.items():
-            if value and hasattr(self, key) and value != getattr(DEFAULT_TRAINING_CONFIG, key):
+            if value is not None and hasattr(self, key):
                 setattr(self, key, value)
 
 DEFAULT_TRAINING_CONFIG = TrainingConfig()

@@ -2,5 +2,5 @@
 venv
 __pycache__
 logs
-checkpoints
-.checkpoints
+data
+weights
