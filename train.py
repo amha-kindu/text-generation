@@ -109,22 +109,32 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
     if is_distributed:
         model = DistributedDataParallel(model, device_ids=[LOCAL_RANK])
 
-    # Learning rate scheduler with warmup and cosine decay
+    # Learning rate scheduler with linear warmup for first warmup_steps
+    # followed by inverse square root decay(scaled by the model's dimensionality)
     def lr_lambda(current_step: int):
-        min_ratio = config.final_lr / config.init_lr
-        if current_step < config.warmup_steps:
-            return float(current_step) / float(max(1, config.warmup_steps))
+        # Avoid division by zero
+        current_step = max(1, current_step)
         
-        progress = (current_step - config.warmup_steps) / float(max(1, config.updates_per_epoch * config.epochs - config.warmup_steps))
-        cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
-
-        return min_ratio + (1.0 - min_ratio) * cosine_decay
-
+        # Scale factor
+        scale = model.config.embed_dim ** -0.5
+        
+        # Linear warmup for first warmup_steps, then inverse square root decay
+        lr = scale * min(
+            current_step ** -0.5,
+            current_step * (config.warmup_steps ** -1.5)
+        )
+        return lr / config.init_lr
     
     scaler = torch.GradScaler(device=DEVICE.type) if MIXED_PRECISION_ENABLED else None
 
     early_stopping = EarlyStopping(patience=config.es_patience, min_delta=config.es_min_delta)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.init_lr, weight_decay=config.weight_decay)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config.init_lr,
+        weight_decay=config.weight_decay,
+        betas=(config.beta1, config.beta2),
+        eps=config.epsilon
+    )
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
     
     accum_loss = 0
@@ -249,20 +259,30 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                         tb_logger.log_histogram("Top-5 Prediction Confidence Distribution", top5_avg_probs.numpy(), global_step)
                     
                     if global_step and global_step % config.save_every == 0:
-                        torch.save({
-                            "weights": model.module.state_dict() if is_distributed else model.state_dict(),
-                            "model_config": model.module.config if is_distributed else model.config,
-                            "training_state": {
-                                "epoch": epoch,
-                                "global_step": global_step,
-                                "training_loss": training_loss,
-                                "validation_loss": validation_loss,
-                                "best_val_loss": early_stopping.best_loss,
-                                "optimizer_state": optimizer.state_dict(),
-                                "lr_scheduler_state": scheduler.state_dict()
+                        # Delete the oldest checkpoint(only keeps the last 'config.max_checkpoints_to_keep' checkpoints)
+                        if global_step > config.max_checkpoints_to_keep * config.save_every:
+                            os.remove(
+                                config.checkpoint.replace(".pt", f"-{(global_step - config.max_checkpoints_to_keep * config.save_every) // 1000 }K_steps.pt")
+                            )
+                        torch.save(
+                            {
+                                "weights": model.module.state_dict() if is_distributed else model.state_dict(),
+                                "model_config": model.module.config if is_distributed else model.config,
+                                "training_state": {
+                                    "epoch": epoch,
+                                    "global_step": global_step,
+                                    "training_loss": training_loss,
+                                    "validation_loss": validation_loss,
+                                    "best_val_loss": early_stopping.best_loss,
+                                    "optimizer_state": optimizer.state_dict(),
+                                    "lr_scheduler_state": scheduler.state_dict()
+                                },
+                                "training_config": config
                             },
-                            "training_config": config
-                        }, os.path.join(config.checkpoint))
+                            os.path.join(
+                                config.checkpoint.replace(".pt", f"-{global_step // 1000}K_steps.pt")
+                            )
+                        )
 
                 global_step += 1
 
@@ -274,35 +294,38 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a GPT model")
     parser.add_argument("--is-distributed", action="store_true", help="Device to train the model on")
-    parser.add_argument("--training-data", type=str, help="Path to the training dataset")
-    parser.add_argument("--validation-data", type=str, help="Path to the validation dataset")
-    parser.add_argument("--testing-data", type=str, help="Path to the testing dataset")
-    parser.add_argument("--batch-size", type=int, help="Batch size")
-    parser.add_argument("--grad-accum-steps", type=int, help="Gradient accumulation steps")
-    parser.add_argument("--warmup-steps", type=int, help="Number of warmup steps")
-    parser.add_argument("--save-every", type=int, help="Number of weight updates between checkpoints")
-    parser.add_argument("--validate-every", type=int, help="Number of weight updates between validations")
-    parser.add_argument("--init-lr", type=float, help="Initial learning rate")
-    parser.add_argument("--final-lr", type=float, help="Final learning rate")
-    parser.add_argument("--weight-decay", type=float, help="L2 regularization coefficient")
-    parser.add_argument("--max-norm", type=float, help="Gradient clipping threshold")
-    parser.add_argument("--ema-alpha", type=float, help="Exponential moving average parameter")
-    parser.add_argument("--label-smoothing", type=float, help="Label smoothing factor")
-    parser.add_argument("--es-patience", type=int, help="Early stopping patience(number of steps)")
-    parser.add_argument("--es-min-delta", type=float, help="Early stopping min delta")
-    parser.add_argument("--tb-log-dir", type=str, help="Initial learning rate")
-    parser.add_argument("--epochs", type=int, help="Number of epochs to train the model")
-    parser.add_argument("--seq-len", type=int, help="Sequence length of the input")
-    parser.add_argument("--embed-dim", type=int, help="Dimensionality of the model")
-    parser.add_argument("--n-blocks", type=int, help="Number of decoder blocks")
-    parser.add_argument("--heads", type=int, help="Number of attention heads")
-    parser.add_argument("--vocab-size", type=int, help="Vocabulary size to use")
-    parser.add_argument("--dropout", type=float, help="Dropout probability")
-    parser.add_argument("--ff-dim", type=int, help="Dimensionality of the feed forward layer")
+    parser.add_argument("--training-data", type=str, default=DEFAULT_TRAINING_CONFIG.training_data, help="Path to the training dataset")
+    parser.add_argument("--validation-data", type=str, default=DEFAULT_TRAINING_CONFIG.validation_data, help="Path to the validation dataset")
+    parser.add_argument("--testing-data", type=str, default=DEFAULT_TRAINING_CONFIG.testing_data, help="Path to the testing dataset")
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_TRAINING_CONFIG.batch_size, help="Batch size")
+    parser.add_argument("--grad-accum-steps", type=int, default=DEFAULT_TRAINING_CONFIG.grad_accum_steps, help="Gradient accumulation steps")
+    parser.add_argument("--warmup-steps", type=int, default=DEFAULT_TRAINING_CONFIG.warmup_steps, help="Number of warmup steps")
+    parser.add_argument("--save-every", type=int, default=DEFAULT_TRAINING_CONFIG.save_every, help="Number of weight updates between checkpoints")
+    parser.add_argument("--validate-every", type=int, default=DEFAULT_TRAINING_CONFIG.validate_every, help="Number of weight updates between validations")
+    parser.add_argument("--init-lr", type=float, default=DEFAULT_TRAINING_CONFIG.init_lr, help="Initial learning rate")
+    parser.add_argument("--weight-decay", type=float, default=DEFAULT_TRAINING_CONFIG.weight_decay, help="L2 regularization coefficient")
+    parser.add_argument("--beta1", type=float, default=DEFAULT_TRAINING_CONFIG.beta1, help="Adam optimizer beta1")
+    parser.add_argument("--beta2", type=float, default=DEFAULT_TRAINING_CONFIG.beta2, help="Adam optimizer beta2")
+    parser.add_argument("--epsilon", type=float, default=DEFAULT_TRAINING_CONFIG.epsilon, help="Adam optimizer epsilon")
+    parser.add_argument("--max-norm", type=float, default=DEFAULT_TRAINING_CONFIG.max_norm, help="Gradient clipping threshold")
+    parser.add_argument("--ema-alpha", type=float, default=DEFAULT_TRAINING_CONFIG.ema_alpha, help="Exponential moving average parameter")
+    parser.add_argument("--label-smoothing", type=float, default=DEFAULT_TRAINING_CONFIG.label_smoothing, help="Label smoothing factor")
+    parser.add_argument("--es-patience", type=int, default=DEFAULT_TRAINING_CONFIG.es_patience, help="Early stopping patience(number of steps)")
+    parser.add_argument("--es-min-delta", type=float, default=DEFAULT_TRAINING_CONFIG.es_min_delta, help="Early stopping min delta")
+    parser.add_argument("--tb-log-dir", type=str, default=DEFAULT_TRAINING_CONFIG.tb_log_dir, help="Initial learning rate")
+    parser.add_argument("--epochs", type=int, default=DEFAULT_TRAINING_CONFIG.epochs, help="Number of epochs to train the model")
+    parser.add_argument("--seq-len", type=int, default=DEFAULT_MODEL_CONFIG.seq_len, help="Sequence length of the input")
+    parser.add_argument("--embed-dim", type=int, default=DEFAULT_MODEL_CONFIG.embed_dim, help="Dimensionality of the model")
+    parser.add_argument("--n-blocks", type=int, default=DEFAULT_MODEL_CONFIG.n_blocks, help="Number of decoder blocks")
+    parser.add_argument("--heads", type=int, default=DEFAULT_MODEL_CONFIG.heads, help="Number of attention heads")
+    parser.add_argument("--vocab-size", type=int, default=DEFAULT_MODEL_CONFIG.vocab_size, help="Vocabulary size to use")
+    parser.add_argument("--dropout", type=float, default=DEFAULT_MODEL_CONFIG.dropout, help="Dropout probability")
+    parser.add_argument("--ff-dim", type=int, default=DEFAULT_MODEL_CONFIG.ff_dim, help="Dimensionality of the feed forward layer")
     parser.add_argument("--dist-backend", type=str, default="nccl", help="Distributed backend")
     parser.add_argument("--tokenizer", type=str, required=True, help="The path to the trained tokenizer model")
     parser.add_argument("--resume", default=False, action="store_true", help="Resume training from checkpoint")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint")
+    parser.add_argument("--max-checkpoints-to-keep", type=int, help="Maximum number of checkpoints to keep")
     parser.add_argument("--validation-samples", type=int, help="Number of samples to use for a single validation run")
 
     args = parser.parse_args()
