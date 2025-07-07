@@ -16,6 +16,34 @@ from torch.utils.data.distributed import DistributedSampler
 from dataset import StreamingTextDataset, TextDataset, IDataset
 
 
+def log_confidence_metrics(logits: torch.Tensor, targets: torch.Tensor, tb_logger: TensorboardLogger, global_step: int, log_interval: int=2000):
+    if global_step % log_interval != 0:
+        # Ensure inputs are on CPU and detached for logging
+        logits = logits.cpu().detach()
+        targets = targets.cpu().detach()
+
+        # Compute softmax probabilities
+        probs = torch.softmax(logits, dim=-1)
+
+        # 1. Top-1 Probability (confidence in the most likely token)
+        top1_probs = probs.max(dim=-1)[0].mean().item()
+        tb_logger.log_scalar("Confidence/Top-1 Probability", top1_probs, global_step)
+
+        # 2. Top-5 Average Probability
+        top5_probs = torch.topk(probs, k=5, dim=-1)[0].mean(dim=-1).flatten()
+        tb_logger.log_histogram("Confidence/Top-5 Probability Distribution", top5_probs.numpy(), global_step)
+
+        # 3. Entropy (measures uncertainty; lower is better)
+        entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=-1).mean().item()
+        tb_logger.log_scalar("Confidence/Entropy", entropy, global_step)
+
+        # 4. Perplexity (based on cross-entropy loss)
+        log_probs = torch.log_softmax(logits, dim=-1)
+        nll = nn.functional.nll_loss(log_probs.view(-1, log_probs.size(-1)), targets.view(-1), reduction='mean')
+        perplexity = torch.exp(nll).item()
+        tb_logger.log_scalar("Confidence/Perplexity", perplexity, global_step)
+
+
 class EarlyStopping:
     def __init__(self, patience=5, min_delta=0):
         self.counter = 0
@@ -254,9 +282,8 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                         "val_loss": f"{validation_loss:6.3f}"
                     })
                     
-                    if global_step % 2000 == 0:
-                        top5_avg_probs = torch.topk(torch.softmax(logits, dim=-1), k=5, dim=-1)[0].mean(dim=-1).flatten().cpu().detach()
-                        tb_logger.log_histogram("Top-5 Prediction Confidence Distribution", top5_avg_probs.numpy(), global_step)
+                    # Log the confidence metrics                        
+                    log_confidence_metrics(logits, label, tb_logger, global_step)
                     
                     if global_step and global_step % config.save_every == 0:
                         # Delete the oldest checkpoint(only keeps the last 'config.max_checkpoints_to_keep' checkpoints)
