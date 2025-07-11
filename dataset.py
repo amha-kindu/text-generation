@@ -1,24 +1,22 @@
 import json
 import torch
-from abc import ABC, abstractmethod
 from config import *
 from typing import Iterator
-from preprocessor import AmharicPreprocessor
 import sentencepiece as spm
+from abc import ABC, abstractmethod
+from preprocessor import AmharicPreprocessor
 from torch.utils.data import get_worker_info
 from torch.utils.data import Dataset, IterableDataset, DataLoader, Sampler
 
 
 class IDataset(Dataset, ABC):
     def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int) -> None:
+        self.max_len = max_len
         self.file_path = file_path
         self.tokenizer = tokenizer
-        self.max_len = max_len
+        self.preprocessor = AmharicPreprocessor()
 
         self.pad_token = torch.tensor([self.tokenizer.pad_id()], dtype=torch.int64)
-        self.eos_token = torch.tensor([self.tokenizer.eos_id()], dtype=torch.int64)
-        self.bos_token = torch.tensor([self.tokenizer.bos_id()], dtype=torch.int64)
-            
     @staticmethod
     def lookback_mask(size: int) -> torch.Tensor:
         # Lower triangular matrix
@@ -35,14 +33,17 @@ class IDataset(Dataset, ABC):
     def batch_iterator(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
         raise NotImplementedError("Subclass must implement the 'batch_iterator' abstractmethod!")
     
-    def datapoint(self, token_ids: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
-        # Sample:   A B C D E $ $ $
-        # Input:    A B C D $ $ $ $
-        # Target:   B C D E $ $ $ $
+    def get_io_tensors(self, text: str) -> tuple[torch.Tensor, torch.Tensor]:
+        # Text:               A B C D E
+        # Input Structure:    A B C D $ $ $ $
+        # Output Structure:   B C D E $ $ $ $
+
+        text = self.preprocessor.execute(text)
+        token_ids = self.tokenizer.Encode(text, out_type=int)[:self.max_len]        
         padding = self.max_len - len(token_ids) + 1
         
         # (SEQ_LEN,)
-        decoder_input: torch.Tensor = torch.concat([
+        input: torch.Tensor = torch.concat([
             # (len(token_ids) - 1,)
             torch.tensor(token_ids[:-1], dtype=torch.int64),
             
@@ -51,15 +52,15 @@ class IDataset(Dataset, ABC):
         ])[:self.max_len]
 
         # (SEQ_LEN,)
-        target = torch.concat([
+        output = torch.concat([
             # (len(token_ids) - 1,)
             torch.tensor(token_ids[1:], dtype=torch.int64),
             
             # (padding,)
-            torch.tensor([self.pad_token] * (padding + 1), dtype=torch.int64)
+            torch.tensor([self.pad_token] * padding, dtype=torch.int64)
         ])[:self.max_len]
-        
-        return decoder_input, target
+
+        return input, output
 
 
 class TextDataset(IDataset):
@@ -68,19 +69,18 @@ class TextDataset(IDataset):
 
         self.texts = []
         self.file = open(file_path, 'r', encoding='utf-8')
-        preprocessor = AmharicPreprocessor()
         file_name = os.path.basename(file_path)
         with open(file_path, 'r', encoding='utf-8') as f:
             LOGGER.info(f"\033[93mLoading data from {file_name}...\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
             for line in f:
                 # Parse each line as a separate JSON object
                 text = json.loads(line.strip())
-                preprocessed_text = preprocessor.execute(text)
+                preprocessed_text = self.preprocessor.execute(text)
                 if preprocessed_text:
                     self.texts.append(preprocessed_text)
                     if self.texts and len(self.texts) % 100000 == 0:
-                        LOGGER.info(f"\033[93mLoaded {len(self.texts)} texts from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
-        LOGGER.info(f"\033[92mDone! Loaded {len(self.texts)} texts from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+                        LOGGER.info(f"\033[93mLoaded {len(self.texts)} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+        LOGGER.info(f"\033[92mDone! Loaded {len(self.texts)} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
 
     def __len__(self) -> int:
         return len(self.texts)
@@ -91,37 +91,20 @@ class TextDataset(IDataset):
     def __getitem__(self, index) -> dict:
         text = self.texts[index]
         
-        token_ids = self.tokenizer.Encode(text, out_type=int)
-        token_ids = token_ids[:self.max_len]
-        
-        decoder_input, target = self.datapoint(token_ids)
-
+        input_tensor, output_tensor = self.get_io_tensors(text)
         return {
             # (SEQ_LEN,)
-            "decoder_input": decoder_input,
-
+            "decoder_input": input_tensor,
+            
             # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
-            "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
-
+            "decoder_mask": (input_tensor != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
+            
             # (SEQ_LEN,)
-            "label": target
+            "label": output_tensor
         }
+    
 
-
-class IStreamDataset(IterableDataset, IDataset):
-
-    @staticmethod
-    @abstractmethod
-    def collate_fn(batch):
-        # Assumes all items are same shape already (fixed-length seqs)
-        return {
-            "decoder_input": torch.stack([item["decoder_input"] for item in batch]),
-            "decoder_mask": torch.stack([item["decoder_mask"] for item in batch]),
-            "label": torch.stack([item["label"] for item in batch])
-        }
-
-
-class StreamingTextDataset(IStreamDataset):
+class StreamingTextDataset(IterableDataset, IDataset):
     def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int) -> None:
         super().__init__(file_path, tokenizer, max_len)
     
@@ -159,19 +142,147 @@ class StreamingTextDataset(IStreamDataset):
                 # Parse each line as a separate JSON object
                 text = json.loads(line.strip())
                 
-                # Tokenize text(split into chunks if text is bigger than max_len)
-                token_ids = self.tokenizer.Encode(text, out_type=int)
-                token_ids = token_ids[:self.max_len]
-                
-                decoder_input, target = self.datapoint(token_ids)
-
+                input_tensor, output_tensor = self.get_io_tensors(text)
                 yield {
                     # (SEQ_LEN,)
-                    "decoder_input": decoder_input,
+                    "decoder_input": input_tensor,
                     
-                    # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN) --> (1, 1, SEQ_LEN, SEQ_LEN)
-                    "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
+                    # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
+                    "decoder_mask": (input_tensor != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
                     
                     # (SEQ_LEN,)
-                    "label": target
+                    "label": output_tensor
                 }
+
+
+class Conversation:
+    def __init__(self, system_text=None):
+        self.exchanges = []
+        self.system_text = system_text
+    
+    def add_exchange(self, input_text: str, output_text: str):
+        self.exchanges.append({
+            "input": input_text,
+            "output": output_text
+        })
+
+
+class FineTuningDataset(IDataset):
+    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int) -> None:
+        
+        super().__init__(file_path, tokenizer, max_len)        
+        self.bot_token = torch.tensor([self.tokenizer.PieceToId("[BOT]")], dtype=torch.int64)
+        self.user_token = torch.tensor([self.tokenizer.PieceToId("[USER]")], dtype=torch.int64)
+        self.stop_token = torch.tensor([self.tokenizer.PieceToId("[STOP]")], dtype=torch.int64)
+        self.system_token = torch.tensor([self.tokenizer.PieceToId("[SYSTEM]")], dtype=torch.int64)
+
+        self.samples = []
+        self.file = open(file_path, 'r', encoding='utf-8')
+        file_name = os.path.basename(file_path)
+        with open(file_path, 'r', encoding='utf-8') as f:
+            LOGGER.info(f"\033[93mLoading data from {file_name}...\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+            data = json.load(f)
+            for sample in data:
+                system_prompt = sample.get("system", "")
+                if system_prompt:
+                    system_prompt = self.preprocessor.execute(system_prompt)
+                conv = Conversation(system_prompt)
+                for exchange in sample["exchanges"]:
+                    try:
+                        conv.add_exchange(
+                            self.preprocessor.execute(exchange["input"]),
+                            self.preprocessor.execute(exchange["output"])
+                        )
+                    except Exception as e:
+                        LOGGER.error('File must be in JSON format [{"system": ..., "exchanges": [{"input": ..., "output": ...}, ...}] ')
+                        exit(1)
+                self.samples.append(conv)
+
+                if self.samples and len(self.samples) % 100000 == 0:
+                    LOGGER.info(f"\033[93mLoaded {len(self.samples)} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+        LOGGER.info(f"\033[92mDone! Loaded {len(self.samples)} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+    
+    def __len__(self) -> int:
+        return len(self.samples)
+    
+    def batch_iterator(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
+        return DataLoader(self, batch_size, shuffle=(sampler is None), sampler=sampler)
+
+    def __getitem__(self, index) -> dict:
+        conv: Conversation = self.samples[index]
+        input_tensor, output_tensor = self.get_io_tensors(conv)
+        
+        return {
+            # (SEQ_LEN,)
+            "decoder_input": input_tensor,
+                        
+            # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
+            "decoder_mask": (input_tensor != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
+            
+            # (SEQ_LEN,)
+            "label": output_tensor
+        }
+    
+    def get_io_tensors(self, conv: Conversation) -> tuple[torch.Tensor, torch.Tensor]:
+        # System:              K L M N O
+        # Conversation:        User: A B C D E 
+        #                      Bot:  F G H I J
+        #                      ...
+        #                      User: Q R S T U
+        #                      Bot:  V W X Y Z
+        # Input Structure:     [SYSTEM] K L M N O [USER] A B C D E [BOT] F G H I J ... [USER] Q R S T U [BOT] V W X Y   Z    $ $ $
+        # Output Structure:        $    $ $ $ $ $    $   $ $ $ $ $   $   $ $ $ $ $ ...    $   $ $ $ $ $    V  W X Y Z [STOP] $ $ $
+        
+        input_ids: list[int] = []
+        if conv.system_text:
+            input_ids.append(self.system_token)
+            conv.system_text = self.preprocessor.execute(conv.system_text)
+            input_ids.extend(self.tokenizer.Encode(conv.system_text, out_type=int))
+        
+        exchanges = []
+        for exchange in conv.exchanges:
+            input_text = self.preprocessor.execute(exchange["input"])
+            output_text = self.preprocessor.execute(exchange["output"])
+            input_token_ids = self.tokenizer.Encode(input_text, out_type=int)
+            output_token_ids = self.tokenizer.Encode(output_text, out_type=int)
+            exchanges.extend([
+                self.user_token,
+                *input_token_ids,
+                self.bot_token,
+                *output_token_ids
+            ])
+        
+        # Discard tokens of the earlier exchanges if input_ids gets too long(exceeds max_len)
+        if len(input_ids) + len(exchanges)> self.max_len:
+            input_ids.extend(exchanges[len(input_ids) + len(exchanges) - self.max_len:])
+        else:
+            input_ids.extend(exchanges)
+        
+        input_suffix_padding = self.max_len - len(input_ids)
+        last_bot_token_idx = max(i for i, v in enumerate(input_ids) if v == self.bot_token)        
+        
+        # (SEQ_LEN,)
+        input: torch.Tensor = torch.concat([
+            # (len(input_ids),)
+            torch.tensor(input_ids, dtype=torch.int64),
+            
+            # (input_suffix_padding,)
+            torch.tensor([self.pad_token] * input_suffix_padding, dtype=torch.int64)
+        ])[:self.max_len]
+        
+        # (SEQ_LEN,)
+        output: torch.Tensor = torch.concat([
+            # (last_bot_token_idx,)
+            torch.tensor([self.pad_token] * last_bot_token_idx, dtype=torch.int64),
+            
+            # (len(input_ids) - last_bot_token_idx - 1,)
+            torch.tensor(input_ids[last_bot_token_idx + 1:], dtype=torch.int64),
+            
+            # (1,)
+            torch.tensor([self.stop_token], dtype=torch.int64),
+            
+            # (input_suffix_padding,)
+            torch.tensor([self.pad_token] * input_suffix_padding, dtype=torch.int64),
+        ])[:self.max_len]
+        
+        return input, output

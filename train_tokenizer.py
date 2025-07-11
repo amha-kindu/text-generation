@@ -58,8 +58,8 @@ if __name__ == "__main__":
         character_coverage=1.0,
         model_type='bpe',
         unk_id=0, pad_id=1, bos_id=2, eos_id=3,
-        user_defined_symbols='[USER],[BOT],[CONTEXT]',
-        unk_piece='[UNK]', pad_piece='[PAD]', bos_piece='[SOS]', eos_piece='[EOS]',
+        user_defined_symbols='[USER],[BOT],[SYSTEM]',
+        unk_piece='[UNK]', pad_piece='[PAD]', bos_piece='[SOS]', eos_piece='[STOP]',
         allow_whitespace_only_pieces= True,
         train_extremely_large_corpus=True,
         max_sentence_length=args.max_sentence_length

@@ -12,8 +12,7 @@ import torch.distributed as dist
 from tensorboard_logger import TensorboardLogger
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, RandomSampler
-from torch.utils.data.distributed import DistributedSampler
-from dataset import StreamingTextDataset, TextDataset, IDataset
+from dataset import StreamingTextDataset, TextDataset, FineTuningDataset, IDataset
 
 
 def log_confidence_metrics(logits: torch.Tensor, targets: torch.Tensor, tb_logger: TensorboardLogger, global_step: int, log_interval: int=2000):
@@ -60,43 +59,6 @@ class EarlyStopping:
             if self.counter >= self.patience:
                 return True
         return False
-
-
-@torch.no_grad()
-def test(config: TrainingConfig, model: GPTmodel, test_dataset: IDataset, is_distributed: bool=False):
-    model.eval()
-
-    loss_func = nn.CrossEntropyLoss(ignore_index=test_dataset.tokenizer.pad_id(), label_smoothing=0.1).to(DEVICE)
-
-    sampler = DistributedSampler(test_dataset, num_replicas=dist.get_world_size(), rank=LOCAL_RANK) if is_distributed else None
-    batch_iterator = tqdm(test_dataset.batch_iterator(config.batch_size, sampler=sampler), desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mModel Evaluation", disable = GLOBAL_RANK != COORDINATOR_RANK)
-
-    evaluation_loss = 0
-    for index, batch in enumerate(batch_iterator):
-        # (N_BATCHES, SEQ_LEN)
-        decoder_input = batch["decoder_input"].to(DEVICE)
-
-        # (1, SEQ_LEN, SEQ_LEN)
-        decoder_mask = batch["decoder_mask"].to(DEVICE)
-
-        # (N_BATCHES, SEQ_LEN)
-        label: torch.Tensor = batch['label'].to(DEVICE)
-
-        with torch.autocast(DEVICE.type, enabled=MIXED_PRECISION_ENABLED):
-            # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
-            logits: torch.Tensor = model(decoder_input, decoder_mask)
-
-            test_loss: torch.Tensor = loss_func(
-                # (N_BATCHES, SEQ_LEN, VOCAB_SIZE) --> (N_BATCHES * SEQ_LEN, VOCAB_SIZE)
-                logits.view(-1, model.config.vocab_size),
-
-                # (N_BATCHES, SEQ_LEN) --> (N_BATCHES * SEQ_LEN, )
-                label.view(-1)
-            )
-
-        batch_iterator.set_postfix({"loss": f"{evaluation_loss / (index + 1):6.3f}"})
-
-        evaluation_loss += test_loss.item()
     
     
 @torch.no_grad()
@@ -194,7 +156,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
             # (N_BATCHES, SEQ_LEN)
             decoder_input: torch.Tensor = batch["decoder_input"].to(DEVICE)
 
-            # (1, SEQ_LEN, SEQ_LEN)
+            # (1, 1, SEQ_LEN, SEQ_LEN)
             decoder_mask: torch.Tensor = batch["decoder_mask"].to(DEVICE)
             
             # (N_BATCHES, SEQ_LEN)
@@ -323,7 +285,6 @@ if __name__ == "__main__":
     parser.add_argument("--is-distributed", action="store_true", help="Device to train the model on")
     parser.add_argument("--training-data", type=str, default=DEFAULT_TRAINING_CONFIG.training_data, help="Path to the training dataset")
     parser.add_argument("--validation-data", type=str, default=DEFAULT_TRAINING_CONFIG.validation_data, help="Path to the validation dataset")
-    parser.add_argument("--testing-data", type=str, default=DEFAULT_TRAINING_CONFIG.testing_data, help="Path to the testing dataset")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_TRAINING_CONFIG.batch_size, help="Batch size")
     parser.add_argument("--grad-accum-steps", type=int, default=DEFAULT_TRAINING_CONFIG.grad_accum_steps, help="Gradient accumulation steps")
     parser.add_argument("--warmup-steps", type=int, default=DEFAULT_TRAINING_CONFIG.warmup_steps, help="Number of warmup steps")
@@ -351,6 +312,7 @@ if __name__ == "__main__":
     parser.add_argument("--dist-backend", type=str, default="nccl", help="Distributed backend")
     parser.add_argument("--tokenizer", type=str, required=True, help="The path to the trained tokenizer model")
     parser.add_argument("--resume", default=False, action="store_true", help="Resume training from checkpoint")
+    parser.add_argument("--finetune", default=False, action="store_true", help="Finetune the model on conversational dataset")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint")
     parser.add_argument("--max-checkpoints-to-keep", type=int, help="Maximum number of checkpoints to keep")
     parser.add_argument("--validation-samples", type=int, help="Number of samples to use for a single validation run")
@@ -370,57 +332,54 @@ if __name__ == "__main__":
     model_config = ModelConfig(**args.__dict__)
 
     state, weights = {}, {}
-    if args.resume and args.checkpoint:
+    if args.resume or args.finetune:
         if not os.path.exists(args.checkpoint):
             raise FileNotFoundError(f"File {args.checkpoint} does not exist")
-
         LOGGER.info(f"Loading checkpoint from '{args.checkpoint}'...")
         state: dict = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
         weights = state["weights"]
         model_config: ModelConfig = state["model_config"]
-        training_config: TrainingConfig = state["training_config"]
-        training_config.update(**args.__dict__)
-        state.pop("weights")
+        if args.resume:
+            training_config: TrainingConfig = state["training_config"]
+            training_config.update(**args.__dict__)
+        state.pop("weights")        
+        if args.finetune and not args.resume:
+            state = {}
     
-    samples = get_line_count(training_config.training_data)
+    os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
+    tokenizer = spm.SentencePieceProcessor()
+    tokenizer.LoadFromFile(args.tokenizer)
+    
+    if args.finetune:
+        train_dataset = FineTuningDataset(training_config.training_data, tokenizer, model_config.seq_len)
+        val_dataset = FineTuningDataset(training_config.validation_data, tokenizer, model_config.seq_len)
+        samples = len(train_dataset)    
+    elif os.path.getsize(training_config.training_data) > 200 * 1024 * 1024:
+        if GLOBAL_RANK == COORDINATOR_RANK:
+            LOGGER.info(f"File '{os.path.basename(training_config.training_data)}' too large! streaming file...")
+        train_dataset = StreamingTextDataset(training_config.training_data, tokenizer, model_config.seq_len)
+        val_dataset = TextDataset(training_config.validation_data, tokenizer, model_config.seq_len)
+        samples = get_line_count(training_config.training_data)
+    else:
+        train_dataset = TextDataset(training_config.training_data, tokenizer, model_config.seq_len)
+        val_dataset = TextDataset(training_config.validation_data, tokenizer, model_config.seq_len)
+        samples = len(train_dataset)
+    
     training_config.samples_per_epoch = math.ceil(samples / (training_config.batch_size * WORLD_SIZE))
     training_config.updates_per_epoch = math.ceil(training_config.samples_per_epoch / training_config.grad_accum_steps)
+    
+    model = GPTmodel.build(model_config, weights).to(DEVICE)
+    
     if GLOBAL_RANK == COORDINATOR_RANK:
         numerical_configs = {k: v for k, v in training_config.to_dict().items() if not isinstance(v, str)}
         LOGGER.info(f"Total training samples: {samples}")
         LOGGER.info(f"Using training config: {numerical_configs}")
-        LOGGER.info(f"Using model config: {model_config}")
-        
-    os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
-    tokenizer = spm.SentencePieceProcessor()
-    tokenizer.LoadFromFile(args.tokenizer)
-       
-    if os.path.getsize(training_config.training_data) > 200 * 1024 * 1024:
-        if GLOBAL_RANK == COORDINATOR_RANK:
-            LOGGER.info(f"File '{os.path.basename(training_config.training_data)}' too large! streaming file...")
-        train_dataset = StreamingTextDataset(training_config.training_data, tokenizer, model_config.seq_len)
-    else:
-        train_dataset = TextDataset(training_config.training_data, tokenizer, model_config.seq_len)
-    
-    if os.path.getsize(training_config.testing_data) > 200 * 1024 * 1024:
-        if GLOBAL_RANK == COORDINATOR_RANK:
-            LOGGER.info(f"File '{os.path.basename(training_config.testing_data)}' too large! streaming file...")
-        test_dataset = StreamingTextDataset(training_config.testing_data, tokenizer, model_config.seq_len)
-    else:
-        test_dataset = TextDataset(training_config.testing_data, tokenizer, model_config.seq_len)
-
-    val_dataset = TextDataset(training_config.validation_data, tokenizer, model_config.seq_len)
-
-    model = GPTmodel.build(model_config, weights).to(DEVICE)
-    
-    if GLOBAL_RANK == COORDINATOR_RANK:
         LOGGER.info(f"Initiating training with {'mixed-precision' if MIXED_PRECISION_ENABLED else 'single-precision'}...")
+        LOGGER.info(f"Using model config: {model_config}")
         LOGGER.info(f"Model size: {sum(p.numel() for p in model.parameters()) * 4 / (1024 ** 2):.2f}MB")
         LOGGER.info(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
     train(training_config, model, train_dataset, val_dataset, args.is_distributed, state)
-
-    test(training_config, model, test_dataset, args.is_distributed)
 
     if args.is_distributed:
         dist.destroy_process_group()
