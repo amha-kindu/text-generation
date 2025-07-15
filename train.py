@@ -15,10 +15,10 @@ from torch.utils.data import DataLoader, RandomSampler
 from dataset import StreamingTextDataset, TextDataset, FineTuningDataset, IDataset
 
 
-def log_confidence_metrics(logits: torch.Tensor, targets: torch.Tensor, tb_logger: TensorboardLogger, global_step: int, log_interval: int=2000):
+def log_confidence_metrics(logits: torch.Tensor, targets: torch.Tensor, tb_logger: TensorboardLogger, global_step: int, pad_token: int, log_interval: int=2000):
     if global_step % log_interval != 0:
         # Ensure inputs are on CPU and detached for logging
-        logits = logits.cpu().detach()
+        logits = logits.cpu().detach().float()
         targets = targets.cpu().detach()
 
         # Compute softmax probabilities
@@ -38,7 +38,12 @@ def log_confidence_metrics(logits: torch.Tensor, targets: torch.Tensor, tb_logge
 
         # 4. Perplexity (based on cross-entropy loss)
         log_probs = torch.log_softmax(logits, dim=-1)
-        nll = nn.functional.nll_loss(log_probs.view(-1, log_probs.size(-1)), targets.view(-1), reduction='mean')
+        nll = nn.functional.nll_loss(
+            log_probs.view(-1, log_probs.size(-1)),
+            targets.view(-1),
+            ignore_index=pad_token,
+            reduction='mean'
+        )
         perplexity = torch.exp(nll).item()
         tb_logger.log_scalar("Confidence/Perplexity", perplexity, global_step)
 
@@ -245,13 +250,13 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                     })
                     
                     # Log the confidence metrics                        
-                    log_confidence_metrics(logits, label, tb_logger, global_step)
+                    log_confidence_metrics(logits, label, tb_logger, global_step, train_dataset.tokenizer.pad_id())
                     
                     if global_step and global_step % config.save_every == 0:
                         # Delete the oldest checkpoint(only keeps the last 'config.max_checkpoints_to_keep' checkpoints)
                         if global_step > config.max_checkpoints_to_keep * config.save_every:
                             os.remove(
-                                config.checkpoint.replace(".pt", f"-{(global_step - config.max_checkpoints_to_keep * config.save_every) // 1000 }K_steps.pt")
+                                config.checkpoint.replace(".pt", f"-{(global_step - config.max_checkpoints_to_keep * config.save_every) / 1000:.2f}K.pt")
                             )
                         torch.save(
                             {
@@ -269,7 +274,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                                 "training_config": config
                             },
                             os.path.join(
-                                config.checkpoint.replace(".pt", f"-{global_step // 1000}K_steps.pt")
+                                config.checkpoint.replace(".pt", f"-{global_step / 1000:.2f}K.pt")
                             )
                         )
 
@@ -283,8 +288,8 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a GPT model")
     parser.add_argument("--is-distributed", action="store_true", help="Device to train the model on")
-    parser.add_argument("--training-data", type=str, default=DEFAULT_TRAINING_CONFIG.training_data, help="Path to the training dataset")
-    parser.add_argument("--validation-data", type=str, default=DEFAULT_TRAINING_CONFIG.validation_data, help="Path to the validation dataset")
+    parser.add_argument("--training-data", required=True, type=str, default=DEFAULT_TRAINING_CONFIG.training_data, help="Path to the training dataset")
+    parser.add_argument("--validation-data", required=True, type=str, default=DEFAULT_TRAINING_CONFIG.validation_data, help="Path to the validation dataset")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_TRAINING_CONFIG.batch_size, help="Batch size")
     parser.add_argument("--grad-accum-steps", type=int, default=DEFAULT_TRAINING_CONFIG.grad_accum_steps, help="Gradient accumulation steps")
     parser.add_argument("--warmup-steps", type=int, default=DEFAULT_TRAINING_CONFIG.warmup_steps, help="Number of warmup steps")
@@ -342,6 +347,9 @@ if __name__ == "__main__":
         if args.resume:
             training_config: TrainingConfig = state["training_config"]
             training_config.update(**args.__dict__)
+        else:
+            model_config.update(dropout=args.dropout)
+        
         state.pop("weights")        
         if args.finetune and not args.resume:
             state = {}
@@ -353,7 +361,8 @@ if __name__ == "__main__":
     if args.finetune:
         train_dataset = FineTuningDataset(training_config.training_data, tokenizer, model_config.seq_len)
         val_dataset = FineTuningDataset(training_config.validation_data, tokenizer, model_config.seq_len)
-        samples = len(train_dataset)    
+        training_config.checkpoint = training_config.checkpoint.replace(".pt", "-finetuned.pt")
+        samples = len(train_dataset)
     elif os.path.getsize(training_config.training_data) > 200 * 1024 * 1024:
         if GLOBAL_RANK == COORDINATOR_RANK:
             LOGGER.info(f"File '{os.path.basename(training_config.training_data)}' too large! streaming file...")

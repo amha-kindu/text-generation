@@ -73,7 +73,11 @@ class Config:
 
     def __repr__(self):
         return f"{self.__class__.__name__}({self.__dict__})"
-
+    
+    def update(self, **kwargs):
+        for key, value in kwargs.items():
+            if value is not None and hasattr(self, key):
+                setattr(self, key, value)
 
 class ModelConfig(Config):
     def __init__(self, **kwargs):
@@ -170,11 +174,7 @@ class TrainingConfig(Config):
         
         if self.validation_data and not os.path.isfile(self.validation_data):
             raise FileNotFoundError(f"File '{self.validation_data}' does not exist")
-        
-    def update(self, **kwargs):
-        for key, value in kwargs.items():
-            if value is not None and hasattr(self, key):
-                setattr(self, key, value)
+
 
 DEFAULT_TRAINING_CONFIG = TrainingConfig()
 DEFAULT_MODEL_CONFIG = ModelConfig()

@@ -17,6 +17,7 @@ class IDataset(Dataset, ABC):
         self.preprocessor = AmharicPreprocessor()
 
         self.pad_token = torch.tensor([self.tokenizer.pad_id()], dtype=torch.int64)
+    
     @staticmethod
     def lookback_mask(size: int) -> torch.Tensor:
         # Lower triangular matrix
@@ -176,6 +177,7 @@ class FineTuningDataset(IDataset):
         self.stop_token = torch.tensor([self.tokenizer.PieceToId("[STOP]")], dtype=torch.int64)
         self.system_token = torch.tensor([self.tokenizer.PieceToId("[SYSTEM]")], dtype=torch.int64)
 
+        skips = 0
         self.samples = []
         self.file = open(file_path, 'r', encoding='utf-8')
         file_name = os.path.basename(file_path)
@@ -196,11 +198,17 @@ class FineTuningDataset(IDataset):
                     except Exception as e:
                         LOGGER.error('File must be in JSON format [{"system": ..., "exchanges": [{"input": ..., "output": ...}, ...}] ')
                         exit(1)
-                self.samples.append(conv)
+                try:
+                    input, output = self.get_io_tensors(conv)
+                    self.samples.append((input, output))
+                except ValueError:
+                    skips += 1
 
-                if self.samples and len(self.samples) % 100000 == 0:
+                if self.samples and len(self.samples) % 30000 == 0:
                     LOGGER.info(f"\033[93mLoaded {len(self.samples)} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
         LOGGER.info(f"\033[92mDone! Loaded {len(self.samples)} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+        LOGGER.info(f"\033[93mSkipped {skips} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+        LOGGER.info(f"\033[93mUsing {len(self.samples)} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
     
     def __len__(self) -> int:
         return len(self.samples)
@@ -209,8 +217,7 @@ class FineTuningDataset(IDataset):
         return DataLoader(self, batch_size, shuffle=(sampler is None), sampler=sampler)
 
     def __getitem__(self, index) -> dict:
-        conv: Conversation = self.samples[index]
-        input_tensor, output_tensor = self.get_io_tensors(conv)
+        input_tensor, output_tensor = self.samples[index]
         
         return {
             # (SEQ_LEN,)
@@ -253,7 +260,7 @@ class FineTuningDataset(IDataset):
             ])
         
         # Discard tokens of the earlier exchanges if input_ids gets too long(exceeds max_len)
-        if len(input_ids) + len(exchanges)> self.max_len:
+        if len(input_ids) + len(exchanges) > self.max_len:
             input_ids.extend(exchanges[len(input_ids) + len(exchanges) - self.max_len:])
         else:
             input_ids.extend(exchanges)
