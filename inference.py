@@ -17,26 +17,27 @@ class GptInferenceEngine:
         self.top_k = top_k
         self.top_p = top_p
         self.temperature = temperature
-        self.pad_id = self.tokenizer.pad_id()
-        self.eos_id = self.tokenizer.eos_id()
+        self.max_len = self.model.config.seq_len
         self.preprocessor = AmharicPreprocessor()
+        self.stop_token = self.tokenizer.PieceToId("[STOP]")
 
         self.model.eval()
+        
+    def get_tokens(self, text: str) -> list[int]:
+        text = self.preprocessor.execute(text)
+        return self.tokenizer.Encode(text, out_type=int)
 
     @torch.no_grad()
-    def complete(self, text: str) -> Iterator[int]:
-        text = self.preprocessor.execute(text)
-        token_ids: list[int] = self.tokenizer.Encode(text, out_type=int)
-
+    def complete(self, token_ids: list[int]) -> Iterator[int]:
         predicted_token = None
-        while token_ids and len(token_ids) < self.model.config.seq_len and predicted_token != self.eos_id:
+        while token_ids and len(token_ids) < self.max_len:
             decoder_input = torch.tensor(
                 token_ids,
                 dtype=torch.int64
             ).to(DEVICE).unsqueeze(0)
                         
             decoder_mask = TextDataset.lookback_mask(len(token_ids)).to(DEVICE)
-            
+                        
             with torch.autocast(device_type=DEVICE.type, enabled=MIXED_PRECISION_ENABLED):
                 # (1, SEQ_LEN, VOCAB_SIZE)
                 logits = self.model(decoder_input, decoder_mask)
@@ -67,22 +68,28 @@ class GptInferenceEngine:
             probs = probs / probs.sum()
             predicted_token = torch.multinomial(probs, 1).item()
             
+            if predicted_token == self.stop_token:
+                break
+            
             token_ids.append(predicted_token)
-
             yield predicted_token
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Train a GPT model")
+    parser = argparse.ArgumentParser(description="Conduct inference on model")
     parser.add_argument("--top-k", type=int, default=0, help="Top k tokens to sample from (set to 0 to disable)")
     parser.add_argument("--top-p", type=float, default=0.0, help="Top p (nucleus) sampling probability (set to 0.0 to disable)")
     parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature (t=1.0 for normal sampling, 0<t<1.0 for less random, t>1.0 for more random sampling)")
     parser.add_argument("--checkpoint", type=str, required=True, help="File path to load saved checkpoint")
+    parser.add_argument("--tokenizer", type=str, required=True, help="File path to load SentencePiece tokenizer")
 
     args = parser.parse_args()
 
     if not os.path.exists(args.checkpoint) and not os.path.isfile(args.checkpoint):
         raise FileNotFoundError(f"File {args.checkpoint} does not exist")
+    
+    if not os.path.exists(args.tokenizer) and not os.path.isfile(args.tokenizer):
+        raise FileNotFoundError(f"File {args.tokenizer} does not exist")
     
     LOGGER.info(f"Loading checkpoint from {args.checkpoint}...")
     checkpoint: dict = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
@@ -100,9 +107,7 @@ if __name__ == '__main__':
     LOGGER.info(f"Initiating inference with {'mixed-precision' if MIXED_PRECISION_ENABLED else 'single-precision'}...")
     
     tokenizer = spm.SentencePieceProcessor()
-    tokenizer.LoadFromFile(
-        f"{WORKING_DIR}/tokenizers/amharic-bpe-tokenizer-{model_config.vocab_size // 1000}k.model"
-    )
+    tokenizer.LoadFromFile(args.tokenizer)
     inference_engine = GptInferenceEngine(model, tokenizer, top_k=args.top_k, top_p=args.top_p, temperature=args.temperature)
 
     while True:
@@ -113,11 +118,11 @@ if __name__ == '__main__':
 
         try:
             LOGGER.info(f"Response: {user_input}", extra={"partial": True})
-            for token_id in inference_engine.complete(user_input):
-                if token_id != tokenizer.eos_id():
-                    token: str = tokenizer.IdToPiece(token_id)
-                    LOGGER.info(token.replace("▁", " "), extra={"partial": True})
-                    time.sleep(0.05)
+            tokens = inference_engine.get_tokens(user_input)
+            for token_id in inference_engine.complete(tokens):
+                token: str = tokenizer.IdToPiece(token_id)
+                LOGGER.info(token.replace("▁", " "), extra={"partial": True})
+                time.sleep(0.05)
             print()
         except Exception as e:
             traceback.print_exc()

@@ -16,7 +16,7 @@ class IDataset(Dataset, ABC):
         self.tokenizer = tokenizer
         self.preprocessor = AmharicPreprocessor()
 
-        self.pad_token = torch.tensor([self.tokenizer.pad_id()], dtype=torch.int64)
+        self.pad_token = self.tokenizer.pad_id()
     
     @staticmethod
     def lookback_mask(size: int) -> torch.Tensor:
@@ -172,10 +172,10 @@ class FineTuningDataset(IDataset):
     def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int) -> None:
         
         super().__init__(file_path, tokenizer, max_len)        
-        self.bot_token = torch.tensor([self.tokenizer.PieceToId("[BOT]")], dtype=torch.int64)
-        self.user_token = torch.tensor([self.tokenizer.PieceToId("[USER]")], dtype=torch.int64)
-        self.stop_token = torch.tensor([self.tokenizer.PieceToId("[STOP]")], dtype=torch.int64)
-        self.system_token = torch.tensor([self.tokenizer.PieceToId("[SYSTEM]")], dtype=torch.int64)
+        self.bot_token = self.tokenizer.PieceToId("[BOT]")
+        self.user_token = self.tokenizer.PieceToId("[USER]")
+        self.stop_token = self.tokenizer.PieceToId("[STOP]")
+        self.system_token = self.tokenizer.PieceToId("[SYSTEM]")
 
         skips = 0
         self.samples = []
