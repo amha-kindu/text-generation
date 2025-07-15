@@ -203,6 +203,7 @@ class FineTuningDataset(IDataset):
                     self.samples.append((input, output))
                 except ValueError:
                     skips += 1
+                    continue
 
                 if self.samples and len(self.samples) % 30000 == 0:
                     LOGGER.info(f"\033[93mLoaded {len(self.samples)} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
@@ -249,36 +250,36 @@ class FineTuningDataset(IDataset):
             output_ids.extend([self.pad_token] * len(input_ids))
         
         exchanges_ipt, exchanges_opt = [], []
-        for exchange in conv.exchanges:
+        for exchange in reversed(conv.exchanges):
             input_text = self.preprocessor.execute(exchange["input"])
             output_text = self.preprocessor.execute(exchange["output"])
             input_token_ids = self.tokenizer.Encode(input_text, out_type=int)
             output_token_ids = self.tokenizer.Encode(output_text, out_type=int)
-            exchanges_ipt.extend([
+            
+            # Discard tokens of the earlier exchanges if input_ids gets too long(exceeds max_len)
+            if len(input_ids) + len(exchanges_ipt) + len(input_token_ids) + len(output_token_ids) + 2 > self.max_len:
+                break
+            
+            exchanges_ipt = [
                 self.user_token,
                 *input_token_ids,
                 self.bot_token,
                 *output_token_ids
-            ])
-            exchanges_opt.extend([
+            ] + exchanges_ipt
+            exchanges_opt = [
                 *[self.pad_token] * (len(input_token_ids) + 1),     # Ignore user input tokens during loss calculation
                 *output_token_ids,
                 self.stop_token
-            ])
-        
-        # Discard tokens of the earlier exchanges if input_ids gets too long(exceeds max_len)
-        if len(input_ids) + len(exchanges_ipt) > self.max_len:
-            input_ids.extend(exchanges_ipt[len(input_ids) + len(exchanges_ipt) - self.max_len:])
-            output_ids.extend(exchanges_opt[len(output_ids) + len(exchanges_opt) - self.max_len:])
-        else:
-            input_ids.extend(exchanges_ipt)
-            output_ids.extend(exchanges_opt)
-        
+            ] + exchanges_opt
+                
         # Check if the input_ids are valid after truncation
-        if not (self.bot_token in input_ids and self.user_token in input_ids):
-            raise  ValueError("Input text too long!(no bot and/or user token found within the last max_len tokens)")
+        if not exchanges_ipt:
+            raise  ValueError("Input text too long(or no exchanges)!")
+        
+        input_ids.extend(exchanges_ipt)
+        output_ids.extend(exchanges_opt)
 
-        suffix_padding = self.max_len - len(input_ids)    
+        suffix_padding = self.max_len - len(input_ids)
         
         # (SEQ_LEN,)
         input: torch.Tensor = torch.concat([
