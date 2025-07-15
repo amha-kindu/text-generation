@@ -237,59 +237,65 @@ class FineTuningDataset(IDataset):
         #                      ...
         #                      User: Q R S T U
         #                      Bot:  V W X Y Z
-        # Input Structure:     [SYSTEM] K L M N O [USER] A B C D E [BOT] F G H I J ... [USER] Q R S T U [BOT] V W X Y   Z    $ $ $
-        # Output Structure:        $    $ $ $ $ $    $   $ $ $ $ $   $   $ $ $ $ $ ...    $   $ $ $ $ $    V  W X Y Z [STOP] $ $ $
+        # Input Structure:     [SYSTEM] K L M N O [USER] A B C D E [BOT] F G H I   J    ... [USER] Q R S T U [BOT] V W X Y   Z    $ $ $
+        # Output Structure:        $    $ $ $ $ $    $   $ $ $ $ $   F   G H I J [STOP] ...    $   $ $ $ $ $   V   W X Y Z [STOP] $ $ $
         
         input_ids: list[int] = []
+        output_ids: list[int] = []
         if conv.system_text:
             input_ids.append(self.system_token)
             conv.system_text = self.preprocessor.execute(conv.system_text)
             input_ids.extend(self.tokenizer.Encode(conv.system_text, out_type=int))
+            output_ids.extend([self.pad_token] * len(input_ids))
         
-        exchanges = []
+        exchanges_ipt, exchanges_opt = [], []
         for exchange in conv.exchanges:
             input_text = self.preprocessor.execute(exchange["input"])
             output_text = self.preprocessor.execute(exchange["output"])
             input_token_ids = self.tokenizer.Encode(input_text, out_type=int)
             output_token_ids = self.tokenizer.Encode(output_text, out_type=int)
-            exchanges.extend([
+            exchanges_ipt.extend([
                 self.user_token,
                 *input_token_ids,
                 self.bot_token,
                 *output_token_ids
             ])
+            exchanges_opt.extend([
+                *[self.pad_token] * (len(input_token_ids) + 1),     # Ignore user input tokens during loss calculation
+                *output_token_ids,
+                self.stop_token
+            ])
         
         # Discard tokens of the earlier exchanges if input_ids gets too long(exceeds max_len)
-        if len(input_ids) + len(exchanges) > self.max_len:
-            input_ids.extend(exchanges[len(input_ids) + len(exchanges) - self.max_len:])
+        if len(input_ids) + len(exchanges_ipt) > self.max_len:
+            input_ids.extend(exchanges_ipt[len(input_ids) + len(exchanges_ipt) - self.max_len:])
+            output_ids.extend(exchanges_opt[len(output_ids) + len(exchanges_opt) - self.max_len:])
         else:
-            input_ids.extend(exchanges)
+            input_ids.extend(exchanges_ipt)
+            output_ids.extend(exchanges_opt)
         
-        input_suffix_padding = self.max_len - len(input_ids)
-        last_bot_token_idx = max(i for i, v in enumerate(input_ids) if v == self.bot_token)        
+        # Check if the input_ids are valid after truncation
+        if not (self.bot_token in input_ids and self.user_token in input_ids):
+            raise  ValueError("Input text too long!(no bot and/or user token found within the last max_len tokens)")
+
+        suffix_padding = self.max_len - len(input_ids)    
         
         # (SEQ_LEN,)
         input: torch.Tensor = torch.concat([
             # (len(input_ids),)
             torch.tensor(input_ids, dtype=torch.int64),
             
-            # (input_suffix_padding,)
-            torch.tensor([self.pad_token] * input_suffix_padding, dtype=torch.int64)
+            # (suffix_padding,)
+            torch.tensor([self.pad_token] * suffix_padding, dtype=torch.int64)
         ])[:self.max_len]
         
         # (SEQ_LEN,)
         output: torch.Tensor = torch.concat([
-            # (last_bot_token_idx,)
-            torch.tensor([self.pad_token] * last_bot_token_idx, dtype=torch.int64),
+            # (len(output_ids),)
+            torch.tensor(output_ids, dtype=torch.int64),
             
-            # (len(input_ids) - last_bot_token_idx - 1,)
-            torch.tensor(input_ids[last_bot_token_idx + 1:], dtype=torch.int64),
-            
-            # (1,)
-            torch.tensor([self.stop_token], dtype=torch.int64),
-            
-            # (input_suffix_padding,)
-            torch.tensor([self.pad_token] * input_suffix_padding, dtype=torch.int64),
+            # (suffix_padding,)
+            torch.tensor([self.pad_token] * suffix_padding, dtype=torch.int64),
         ])[:self.max_len]
         
         return input, output
