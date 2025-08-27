@@ -1,0 +1,18 @@
+{
+    "embedding": {
+        "type": "Module",
+        "submodules": []
+    },
+    "projection": {
+        "type": "Module",
+        "submodules": []
+    },
+    "decoders": {
+        "type": "ModuleList",
+        "indices": [3, 4, 5],
+        "submodules": [
+            "norm1",
+            "norm2"
+        ]
+    }
+}

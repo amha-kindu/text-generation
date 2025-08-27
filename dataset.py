@@ -1,15 +1,19 @@
 import json
 import torch
+import random
 from config import *
 from typing import Iterator
 import sentencepiece as spm
+from bisect import bisect_left
 from abc import ABC, abstractmethod
 from preprocessor import AmharicPreprocessor
 from torch.utils.data import get_worker_info
-from torch.utils.data import Dataset, IterableDataset, DataLoader, Sampler
+from torch.utils.data import Dataset, Subset, IterableDataset, DataLoader, Sampler, ConcatDataset, SequentialSampler
 
 
 class IDataset(Dataset, ABC):
+    ignore_index = -100
+    
     def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int) -> None:
         self.max_len = max_len
         self.file_path = file_path
@@ -31,8 +35,8 @@ class IDataset(Dataset, ABC):
         return torch.triu(torch.ones(1, size, size), diagonal=1).type(torch.int) == 0
 
     @abstractmethod
-    def batch_iterator(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
-        raise NotImplementedError("Subclass must implement the 'batch_iterator' abstractmethod!")
+    def get_loader(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
+        raise NotImplementedError("Subclass must implement the 'get_loader' abstractmethod!")
     
     def get_io_tensors(self, text: str) -> tuple[torch.Tensor, torch.Tensor]:
         # Text:               A B C D E
@@ -58,7 +62,7 @@ class IDataset(Dataset, ABC):
             torch.tensor(token_ids[1:], dtype=torch.int64),
             
             # (padding,)
-            torch.tensor([self.pad_token] * padding, dtype=torch.int64)
+            torch.tensor([self.ignore_index] * padding, dtype=torch.int64)
         ])[:self.max_len]
 
         return input, output
@@ -86,7 +90,7 @@ class TextDataset(IDataset):
     def __len__(self) -> int:
         return len(self.texts)
 
-    def batch_iterator(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
+    def get_loader(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
         return DataLoader(self, batch_size, shuffle=(sampler is None), sampler=sampler)
 
     def __getitem__(self, index) -> dict:
@@ -117,7 +121,7 @@ class StreamingTextDataset(IterableDataset, IDataset):
             "label": torch.stack([item["label"] for item in batch])
         }
         
-    def batch_iterator(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
+    def get_loader(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
         return DataLoader(
             self,
             batch_size=batch_size,
@@ -157,7 +161,8 @@ class StreamingTextDataset(IterableDataset, IDataset):
 
 
 class Conversation:
-    def __init__(self, system_text=None):
+    def __init__(self, type: str, system_text=None) -> None:
+        self.type = type
         self.exchanges = []
         self.system_text = system_text
     
@@ -169,9 +174,8 @@ class Conversation:
 
 
 class FineTuningDataset(IDataset):
-    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int) -> None:
-        
-        super().__init__(file_path, tokenizer, max_len)        
+    def __init__(self, intent: str, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int) -> None:
+        super().__init__(file_path, tokenizer, max_len)
         self.bot_token = self.tokenizer.PieceToId("[BOT]")
         self.user_token = self.tokenizer.PieceToId("[USER]")
         self.stop_token = self.tokenizer.PieceToId("[STOP]")
@@ -182,13 +186,15 @@ class FineTuningDataset(IDataset):
         self.file = open(file_path, 'r', encoding='utf-8')
         file_name = os.path.basename(file_path)
         with open(file_path, 'r', encoding='utf-8') as f:
-            LOGGER.info(f"\033[93mLoading data from {file_name}...\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+            LOGGER.info(f"\033[93mLoading data from {file_name}{'/' + intent if intent else ''}...\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
             data = json.load(f)
             for sample in data:
+                if intent and sample['type'] != intent:
+                    continue
                 system_prompt = sample.get("system", "")
                 if system_prompt:
                     system_prompt = self.preprocessor.execute(system_prompt)
-                conv = Conversation(system_prompt)
+                conv = Conversation(sample['type'], system_prompt)
                 for exchange in sample["exchanges"]:
                     try:
                         conv.add_exchange(
@@ -196,7 +202,7 @@ class FineTuningDataset(IDataset):
                             self.preprocessor.execute(exchange["output"])
                         )
                     except Exception as e:
-                        LOGGER.error('File must be in JSON format [{"system": ..., "exchanges": [{"input": ..., "output": ...}, ...}] ')
+                        LOGGER.error('File must be in JSON format [{"system": ..., "exchanges": [{"input": ..., "output": ...}, ...}]]')
                         exit(1)
                 try:
                     input, output = self.get_io_tensors(conv)
@@ -206,15 +212,15 @@ class FineTuningDataset(IDataset):
                     continue
 
                 if self.samples and len(self.samples) % 30000 == 0:
-                    LOGGER.info(f"\033[93mLoaded {len(self.samples)} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
-        LOGGER.info(f"\033[92mDone! Loaded {len(self.samples)} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
-        LOGGER.info(f"\033[93mSkipped {skips} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
-        LOGGER.info(f"\033[93mUsing {len(self.samples)} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+                    LOGGER.info(f"\033[93mLoaded {len(self.samples)} samples from {file_name}{'/' + intent if intent else ''}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None    
+        LOGGER.info(f"\033[92mDone! Loaded {len(self.samples)} samples from {file_name}{'/' + intent if intent else ''}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+        LOGGER.info(f"\033[93mSkipped {skips} samples from {file_name}{'/' + intent if intent else ''}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+        LOGGER.info(f"\033[93mUsing {len(self.samples)} samples from {file_name}{'/' + intent if intent else ''}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
     
     def __len__(self) -> int:
         return len(self.samples)
     
-    def batch_iterator(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
+    def get_loader(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
         return DataLoader(self, batch_size, shuffle=(sampler is None), sampler=sampler)
 
     def __getitem__(self, index) -> dict:
@@ -244,50 +250,50 @@ class FineTuningDataset(IDataset):
         input_ids: list[int] = []
         output_ids: list[int] = []
         if conv.system_text:
-            input_ids.append(self.system_token)
-            conv.system_text = self.preprocessor.execute(conv.system_text)
-            input_ids.extend(self.tokenizer.Encode(conv.system_text, out_type=int))
-            output_ids.extend([self.pad_token] * len(input_ids))
+            input_ids.extend([
+                self.system_token,
+                *self.tokenizer.Encode(conv.system_text, out_type=int)
+            ])
+            output_ids.extend([self.ignore_index] * len(input_ids))
         
         exchanges_ipt, exchanges_opt = [], []
         for exchange in reversed(conv.exchanges):
-            input_text = self.preprocessor.execute(exchange["input"])
-            output_text = self.preprocessor.execute(exchange["output"])
-            input_token_ids = self.tokenizer.Encode(input_text, out_type=int)
-            output_token_ids = self.tokenizer.Encode(output_text, out_type=int)
+            input_token_ids = self.tokenizer.Encode(exchange["input"], out_type=int)
+            output_token_ids = self.tokenizer.Encode(exchange["output"], out_type=int)
             
-            # Discard tokens of the earlier exchanges if input_ids gets too long(exceeds max_len)
             if len(input_ids) + len(exchanges_ipt) + len(input_token_ids) + len(output_token_ids) + 2 > self.max_len:
                 break
             
-            exchanges_ipt = [
-                self.user_token,
-                *input_token_ids,
-                self.bot_token,
-                *output_token_ids
-            ] + exchanges_ipt
-            exchanges_opt = [
-                *[self.pad_token] * (len(input_token_ids) + 1),     # Ignore user input tokens during loss calculation
-                *output_token_ids,
-                self.stop_token
-            ] + exchanges_opt
+            # [USER] A B C ... H I J [BOT] K L M ... X Y   Z   
+            #   $    $ $ $ ... $ $ $   K   L M O ... Y Z [STOP]
+            if input_token_ids and output_token_ids:
+                exchanges_ipt = [
+                    self.user_token,
+                    *input_token_ids,
+                    self.bot_token,
+                    *output_token_ids
+                ] + exchanges_ipt
+                exchanges_opt = [
+                    *[self.ignore_index] * (len(input_token_ids) + 1),
+                    *output_token_ids,
+                    self.stop_token
+                ] + exchanges_opt
                 
-        # Check if the input_ids are valid after truncation
         if not exchanges_ipt:
-            raise  ValueError("Input text too long(or no exchanges)!")
+            raise ValueError("Input text too long(or no exchanges)!")
         
         input_ids.extend(exchanges_ipt)
         output_ids.extend(exchanges_opt)
 
-        suffix_padding = self.max_len - len(input_ids)
+        padding = self.max_len - len(input_ids)
         
         # (SEQ_LEN,)
         input: torch.Tensor = torch.concat([
             # (len(input_ids),)
             torch.tensor(input_ids, dtype=torch.int64),
             
-            # (suffix_padding,)
-            torch.tensor([self.pad_token] * suffix_padding, dtype=torch.int64)
+            # (padding,)
+            torch.tensor([self.pad_token] * padding, dtype=torch.int64)
         ])[:self.max_len]
         
         # (SEQ_LEN,)
@@ -295,8 +301,112 @@ class FineTuningDataset(IDataset):
             # (len(output_ids),)
             torch.tensor(output_ids, dtype=torch.int64),
             
-            # (suffix_padding,)
-            torch.tensor([self.pad_token] * suffix_padding, dtype=torch.int64),
+            # (padding,)
+            torch.tensor([self.ignore_index] * padding, dtype=torch.int64),
         ])[:self.max_len]
         
         return input, output
+
+
+class MultiTaskDataset(Dataset):
+    ignore_index = IDataset.ignore_index
+    
+    def __init__(self, datasets: dict[str, IDataset]) -> None:
+        self.tokenizer = datasets[list(datasets.keys())[0]].tokenizer
+        self.task_names = list(datasets.keys())
+        self.datasets = [datasets[k] for k in self.task_names]
+        self.lengths = [len(ds) for ds in self.datasets]
+        self.offsets = []
+        total = 0
+        for L in self.lengths:
+            self.offsets.append(total)
+            total += L
+        self.total_len = total
+
+    def __len__(self):
+        return self.total_len
+    
+    def get_loader(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
+        return DataLoader(self, batch_size, shuffle=(sampler is None), sampler=sampler)
+
+    def __getitem__(self, global_index: int):
+        task_id = bisect_left(self.offsets, global_index)
+        if task_id == len(self.offsets) or global_index != self.offsets[task_id]:
+            task_id -= 1
+        return self.datasets[task_id][global_index - self.offsets[task_id]]
+
+
+class TemperatureMixSampler(Sampler[int]):
+    def __init__(self, mt_dataset: MultiTaskDataset, alpha: float = 0.5,
+                 steps_per_epoch: int | None = None):
+        self.alpha = alpha
+        self.mt = mt_dataset
+        self.lengths = torch.tensor(self.mt.lengths, dtype=torch.float)
+        self.offsets = torch.tensor(self.mt.offsets, dtype=torch.long)
+        
+        weights = (self.lengths.clamp(min=1.0)) ** alpha # probs ∝ n^alpha
+        self.task_probs = (weights / weights.sum()).tolist()
+        self.steps_per_epoch = steps_per_epoch or sum(self.mt.lengths)
+
+    def __len__(self):
+        return self.steps_per_epoch
+
+    def __iter__(self):
+        probs = torch.tensor(self.task_probs, dtype=torch.float)
+        for _ in range(self.steps_per_epoch):
+            task = torch.multinomial(probs, 1).item()
+            local_len = int(self.lengths[task].item())
+            j = random.randrange(local_len)
+            global_index = self.offsets[task].item() + j
+            yield global_index
+
+
+class RollingShardsDataset:  
+    def __init__(self, datasets: dict[str, Dataset], num_shards: int):
+        assert num_shards >= 1
+        self._round = 0
+        self.num_shards = num_shards
+        self.names = list(datasets.keys())
+        self.datasets = [datasets[n] for n in self.names]
+
+        self._splits = []
+        for ds in self.datasets:
+            self._splits.append(
+                self._even_splits(len(ds), num_shards)
+            )
+
+    @staticmethod
+    def _even_splits(n: int, k: int):
+        base, rem = divmod(n, k)
+        splits, start = [], 0
+        for i in range(k):
+            end = start + base + (1 if i < rem else 0)
+            splits.append((start, end))
+            start = end
+        return splits
+
+    def _dataset_for(self, shard_idx: int) -> Dataset:
+        k = shard_idx % self.num_shards
+        parts = []
+        for ds, splits in zip(self.datasets, self._splits):
+            s, e = splits[k]
+            if e > s:
+                idx = [i for i in range(s, e)]
+                parts.append(Subset(ds, idx))
+        return ConcatDataset(parts) if parts else ConcatDataset([])
+
+    def get_loader(self, batch_size: int, sampler: Sampler=None, shard_idx: int = 0) -> DataLoader:
+        ds = self._dataset_for(shard_idx)
+        if sampler is None:
+            sampler = SequentialSampler(ds)
+        return DataLoader(
+            ds,
+            batch_size=batch_size,
+            sampler=sampler,
+            shuffle=False
+        )
+    
+    def next_loader(self, batch_size: int) -> DataLoader:
+        shard_idx = self._round % self.num_shards
+        self._round += 1
+        return self.get_loader(batch_size, shard_idx=shard_idx)

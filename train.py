@@ -1,5 +1,6 @@
 import os
 import math
+import json
 import torch
 import argparse
 from config import *
@@ -11,40 +12,32 @@ from datetime import datetime
 import torch.distributed as dist
 from tensorboard_logger import TensorboardLogger
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data import DataLoader, RandomSampler
-from dataset import StreamingTextDataset, TextDataset, FineTuningDataset, IDataset
+from torch.utils.data import DataLoader, DistributedSampler
+from dataset import MultiTaskDataset, RollingShardsDataset, StreamingTextDataset,TemperatureMixSampler, TextDataset, FineTuningDataset, IDataset
 
 
-def log_confidence_metrics(logits: torch.Tensor, targets: torch.Tensor, tb_logger: TensorboardLogger, global_step: int, pad_token: int, log_interval: int=2000):
-    if global_step % log_interval != 0:
-        # Ensure inputs are on CPU and detached for logging
-        logits = logits.cpu().detach().float()
-        targets = targets.cpu().detach()
-
+def log_confidence_metrics(logits: torch.Tensor, targets: torch.Tensor, tb_logger: TensorboardLogger, global_step: int, ignore_index: int, log_interval: int=50):
+    if global_step % log_interval == 0:
         # Compute softmax probabilities
         probs = torch.softmax(logits, dim=-1)
 
-        # 1. Top-1 Probability (confidence in the most likely token)
-        top1_probs = probs.max(dim=-1)[0].mean().item()
-        tb_logger.log_scalar("Confidence/Top-1 Probability", top1_probs, global_step)
+        # 1. Average of Top-5 Probabilities
+        top5_probs = torch.topk(probs, k=5, dim=-1).values.mean(dim=-1).flatten().cpu()
+        tb_logger.log_histogram("Confidence/Top-5 Average Probabilities", top5_probs.numpy(), global_step)
 
-        # 2. Top-5 Average Probability
-        top5_probs = torch.topk(probs, k=5, dim=-1)[0].mean(dim=-1).flatten()
-        tb_logger.log_histogram("Confidence/Top-5 Probability Distribution", top5_probs.numpy(), global_step)
-
-        # 3. Entropy (measures uncertainty; lower is better)
-        entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=-1).mean().item()
+        # 2. Entropy (measures uncertainty; lower is better)
+        entropy = -torch.sum(probs * torch.log(probs + 1e-4), dim=-1).mean().cpu().item()
         tb_logger.log_scalar("Confidence/Entropy", entropy, global_step)
-
-        # 4. Perplexity (based on cross-entropy loss)
+        
+        # 3. Perplexity (based on cross-entropy loss)
         log_probs = torch.log_softmax(logits, dim=-1)
         nll = nn.functional.nll_loss(
             log_probs.view(-1, log_probs.size(-1)),
             targets.view(-1),
-            ignore_index=pad_token,
+            ignore_index=ignore_index,
             reduction='mean'
         )
-        perplexity = torch.exp(nll).item()
+        perplexity = torch.exp(nll).cpu().item()
         tb_logger.log_scalar("Confidence/Perplexity", perplexity, global_step)
 
 
@@ -67,11 +60,11 @@ class EarlyStopping:
     
     
 @torch.no_grad()
-def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func: nn.CrossEntropyLoss):
+def validate(model: GPTmodel, data_loader: DataLoader, loss_func: nn.CrossEntropyLoss):
     model.eval()
 
     val_loss = torch.tensor(0, dtype=torch.float32, device=DEVICE)
-    for batch in val_batch_iterator:
+    for batch in data_loader:
         # (N_BATCHES, SEQ_LEN)
         decoder_input = batch["decoder_input"].to(DEVICE)
 
@@ -95,10 +88,10 @@ def validate(model: GPTmodel, val_batch_iterator: DataLoader, loss_func: nn.Cros
 
         val_loss += loss
 
-    return val_loss / len(val_batch_iterator)
+    return val_loss / len(data_loader)
 
 
-def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_dataset: IDataset, is_distributed: bool = False, state: dict = {}) -> None:
+def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_dataset: RollingShardsDataset, is_distributed: bool = False, state: dict = {}, finetuning_config: FinetuningConfig = None) -> None:
     tb_logger = TensorboardLogger(config.tb_log_dir, is_distributed, GLOBAL_RANK, COORDINATOR_RANK)
 
     if is_distributed:
@@ -123,8 +116,15 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
     scaler = torch.GradScaler(device=DEVICE.type) if MIXED_PRECISION_ENABLED else None
 
     early_stopping = EarlyStopping(patience=config.es_patience, min_delta=config.es_min_delta)
+    
+    if finetuning_config.finetune:
+        # Only allocate optimizer state (e.g., momentum buffers, Adam's m/v states) for the LoRA parameters but not for the frozen parameters
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+    else:
+        trainable_params = model.parameters()
+
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        trainable_params,
         lr=config.init_lr,
         weight_decay=config.weight_decay,
         betas=(config.beta1, config.beta2),
@@ -147,15 +147,21 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
         optimizer.load_state_dict(training_state["optimizer_state"])
         scheduler.load_state_dict(training_state["lr_scheduler_state"])
 
-    loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.tokenizer.pad_id(), label_smoothing=config.label_smoothing).to(DEVICE)
-    batch_iterator = train_dataset.batch_iterator(config.batch_size)
-
-    val_sampler = RandomSampler(val_dataset, replacement=True, num_samples=config.validation_samples)
-    val_batch_iterator = val_dataset.batch_iterator(config.batch_size, sampler=val_sampler)
+    loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.ignore_index, label_smoothing=config.label_smoothing).to(DEVICE)
+    
+    train_sampler = DistributedSampler(train_dataset, num_replicas=dist.get_world_size(), rank=LOCAL_RANK, shuffle=True) if is_distributed else None
+    if finetuning_config.finetune:
+        LOGGER.info(f"Using temperature mix sampler with alpha {finetuning_config.sampler_alpha}")
+        train_sampler = TemperatureMixSampler(
+            train_dataset,
+            alpha=finetuning_config.sampler_alpha,
+            steps_per_epoch=config.batch_size * config.samples_per_epoch,
+        )
+    data_loader = train_dataset.get_loader(config.batch_size, sampler=train_sampler)
 
     for epoch in range(initial_epoch, config.epochs):
-        batch_iterator = tqdm(batch_iterator, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch+1}/{config.epochs}", disable = GLOBAL_RANK != COORDINATOR_RANK, total=config.samples_per_epoch)
-        for i, batch in enumerate(batch_iterator):
+        data_loader = tqdm(data_loader, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch+1}/{config.epochs}", disable = GLOBAL_RANK != COORDINATOR_RANK, total=config.samples_per_epoch)
+        for i, batch in enumerate(data_loader):
             model.train()
             
             # (N_BATCHES, SEQ_LEN)
@@ -217,7 +223,11 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                 accum_loss = 0.0
                 
                 if global_step % config.validate_every == 0:
-                    val_loss = validate(model.module if is_distributed else model, val_batch_iterator, loss_func)
+                    val_loss = validate(
+                        model=model.module if is_distributed else model,
+                        data_loader=val_dataset.next_loader(config.batch_size),
+                        loss_func=loss_func
+                    )
                     if is_distributed:
                         torch.distributed.all_reduce(val_loss, op=torch.distributed.ReduceOp.SUM)
                     avg_val_loss = val_loss.item() / WORLD_SIZE
@@ -244,13 +254,12 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                     tb_logger.log_scalars("Loss", {"Training": training_loss}, global_step)
                     tb_logger.log_scalar("Learning Rate", scheduler.get_last_lr()[0], global_step)
                     
-                    batch_iterator.set_postfix({
+                    data_loader.set_postfix({
                         "train_loss": f"{training_loss:6.3f}",
                         "val_loss": f"{validation_loss:6.3f}"
                     })
                     
-                    # Log the confidence metrics                        
-                    log_confidence_metrics(logits, label, tb_logger, global_step, train_dataset.tokenizer.pad_id())
+                    log_confidence_metrics(logits.detach(), label.detach(), tb_logger, global_step, train_dataset.ignore_index)
                     
                     if global_step and global_step % config.save_every == 0:
                         # Delete the oldest checkpoint(only keeps the last 'config.max_checkpoints_to_keep' checkpoints)
@@ -258,21 +267,36 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                             os.remove(
                                 config.checkpoint.replace(".pt", f"-{(global_step - config.max_checkpoints_to_keep * config.save_every) / 1000:.2f}K.pt")
                             )
-                        torch.save(
-                            {
-                                "weights": model.module.state_dict() if is_distributed else model.state_dict(),
-                                "model_config": model.module.config if is_distributed else model.config,
-                                "training_state": {
-                                    "epoch": epoch,
-                                    "global_step": global_step,
-                                    "training_loss": training_loss,
-                                    "validation_loss": validation_loss,
-                                    "best_val_loss": early_stopping.best_loss,
-                                    "optimizer_state": optimizer.state_dict(),
-                                    "lr_scheduler_state": scheduler.state_dict()
-                                },
-                                "training_config": config
+                                         
+                        checkpoint_model = model.module if is_distributed else model     
+                        if finetuning_config is not None:
+                            weights = {
+                                name: param.cpu()
+                                for name, param in checkpoint_model.named_parameters()
+                                if param.requires_grad
+                            }
+                        else:
+                            weights = checkpoint_model.state_dict()
+
+                        checkpoint = {
+                            "weights": weights,
+                            "model_config": checkpoint_model.config,
+                            "training_state": {
+                                "epoch": epoch,
+                                "global_step": global_step,
+                                "training_loss": training_loss,
+                                "validation_loss": validation_loss,
+                                "best_val_loss": early_stopping.best_loss,
+                                "optimizer_state": optimizer.state_dict(),
+                                "lr_scheduler_state": scheduler.state_dict()
                             },
+                            "training_config": config
+                        }
+                        if finetuning_config.finetune:
+                            checkpoint["finetuning_config"] = finetuning_config
+                        
+                        torch.save(
+                            checkpoint,
                             os.path.join(
                                 config.checkpoint.replace(".pt", f"-{global_step / 1000:.2f}K.pt")
                             )
@@ -317,10 +341,17 @@ if __name__ == "__main__":
     parser.add_argument("--dist-backend", type=str, default="nccl", help="Distributed backend")
     parser.add_argument("--tokenizer", type=str, required=True, help="The path to the trained tokenizer model")
     parser.add_argument("--resume", default=False, action="store_true", help="Resume training from checkpoint")
-    parser.add_argument("--finetune", default=False, action="store_true", help="Finetune the model on conversational dataset")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint")
     parser.add_argument("--max-checkpoints-to-keep", type=int, help="Maximum number of checkpoints to keep")
-    parser.add_argument("--validation-samples", type=int, help="Number of samples to use for a single validation run")
+    parser.add_argument("--finetune", default=False, action="store_true", help="Finetune the model on conversational dataset")
+    parser.add_argument("--sampler-alpha", default=DEFAULT_FINETUNING_CONFIG.sampler_alpha, type=float, help="The alpha parameter to use for temperature mix sampler")
+    parser.add_argument("--trainable-params", default={}, type=str, help="Path to a json file containing layers to train during finetuning")
+    parser.add_argument("--lora", default=False, action="store_true", help="Flag to use LoRA during finetuning")
+    parser.add_argument("--lora-rank", default=DEFAULT_FINETUNING_CONFIG.lora_rank, type=int, help="Size of the low-rank matrices when finetuning with LoRA")
+    parser.add_argument("--lora-alpha", default=DEFAULT_FINETUNING_CONFIG.lora_alpha, type=int, help="Parameter that scales the LoRA updates when finetuning with LoRA")
+    parser.add_argument("--lora-dropout", default=DEFAULT_FINETUNING_CONFIG.dropout, type=float, help="The Dropout applied to LoRA's input")
+    parser.add_argument("--lora-targets", default={}, type=str, help="Path to a json file containing layers to apply LoRA on")
+    parser.add_argument("--lora-checkpoint", default="", type=str, help="Path to LoRA adapters")
 
     args = parser.parse_args()
     
@@ -333,10 +364,11 @@ if __name__ == "__main__":
     if args.embed_dim and args.heads:
         assert args.embed_dim % args.heads == 0, "embed_dim must be divisible by heads"
 
-    training_config = TrainingConfig(**args.__dict__)
     model_config = ModelConfig(**args.__dict__)
+    training_config = TrainingConfig(**args.__dict__)
+    finetuning_config = FinetuningConfig(**args.__dict__)
 
-    state, weights = {}, {}
+    state, weights, lora_weights = {}, {}, {}
     if args.resume or args.finetune:
         if not os.path.exists(args.checkpoint):
             raise FileNotFoundError(f"File {args.checkpoint} does not exist")
@@ -347,8 +379,18 @@ if __name__ == "__main__":
         if args.resume:
             training_config: TrainingConfig = state["training_config"]
             training_config.update(**args.__dict__)
+            if args.finetune:
+                finetuning_config: FinetuningConfig = state["finetuning_config"]
+                finetuning_config.update(dropout=args.lora_dropout)
         else:
             model_config.update(dropout=args.dropout)
+        
+        if args.lora and args.lora_checkpoint:
+            if not os.path.exists(args.lora_checkpoint):
+                raise FileNotFoundError(f"File {args.lora_checkpoint} does not exist")
+            LOGGER.info(f"Loading lora checkpoint from '{args.lora_checkpoint}'...")
+            lora_state: dict = torch.load(args.lora_checkpoint, map_location=DEVICE, weights_only=False)
+            lora_weights = lora_state["weights"]
         
         state.pop("weights")        
         if args.finetune and not args.resume:
@@ -358,10 +400,28 @@ if __name__ == "__main__":
     tokenizer = spm.SentencePieceProcessor()
     tokenizer.LoadFromFile(args.tokenizer)
     
-    if args.finetune:
-        train_dataset = FineTuningDataset(training_config.training_data, tokenizer, model_config.seq_len)
-        val_dataset = FineTuningDataset(training_config.validation_data, tokenizer, model_config.seq_len)
-        training_config.checkpoint = training_config.checkpoint.replace(".pt", "-finetuned.pt")
+    if finetuning_config.finetune:
+        intents = [
+            "qa",
+            "afrisent",
+            "multiturn-dialogue",
+            "amharic_story_generation",
+            "amharic_spellcheck", "other",
+            "masakhanews", "masakhaner", "xlsum_summarization",
+            "xlsum_reverse_summarization", "amharic_title_generation",
+        ]
+        train_dataset = MultiTaskDataset({
+            intent: FineTuningDataset(intent, training_config.training_data, tokenizer, model_config.seq_len) for intent in intents
+        })
+        
+        val_dataset = {
+            intent: FineTuningDataset(intent, training_config.validation_data, tokenizer, model_config.seq_len) for intent in intents
+        }
+        
+        if finetuning_config.lora:
+            training_config.checkpoint = training_config.checkpoint.replace(".pt", f"-lora-adapters-{finetuning_config.lora_rank}R-{finetuning_config.lora_alpha}SF.pt")
+        else:
+            training_config.checkpoint = training_config.checkpoint.replace(".pt", f"-finetuned.pt")
         samples = len(train_dataset)
     elif os.path.getsize(training_config.training_data) > 200 * 1024 * 1024:
         if GLOBAL_RANK == COORDINATOR_RANK:
@@ -377,7 +437,27 @@ if __name__ == "__main__":
     training_config.samples_per_epoch = math.ceil(samples / (training_config.batch_size * WORLD_SIZE))
     training_config.updates_per_epoch = math.ceil(training_config.samples_per_epoch / training_config.grad_accum_steps)
     
-    model = GPTmodel.build(model_config, weights).to(DEVICE)
+    shards = training_config.updates_per_epoch // training_config.validate_every
+    val_dataset = RollingShardsDataset(
+        val_dataset if isinstance(val_dataset, dict) else {"val": val_dataset},
+        num_shards=shards
+    )    
+    
+    lora_targets, trainable_params = {}, {}
+    if args.lora:
+        assert args.lora_targets, "Must specify json file containing layers to apply LoRA on"
+        assert os.path.exists(args.lora_targets) and os.path.isfile(args.lora_targets), f"File {args.lora_targets} does not exist"
+        with open(args.lora_targets, 'r') as f:
+            lora_targets = json.load(f)
+        finetuning_config.lora_targets = lora_targets
+
+    if args.finetune and args.trainable_params:
+        assert os.path.exists(args.trainable_params), f"File {args.trainable_params} does not exist"
+        with open(args.trainable_params, 'r') as f:
+            trainable_params = json.load(f)
+        finetuning_config.trainable_params = trainable_params
+    
+    model = GPTmodel.build(model_config, finetuning_config, weights, lora_weights).to(DEVICE)
     
     if GLOBAL_RANK == COORDINATOR_RANK:
         numerical_configs = {k: v for k, v in training_config.to_dict().items() if not isinstance(v, str)}
@@ -385,10 +465,15 @@ if __name__ == "__main__":
         LOGGER.info(f"Using training config: {numerical_configs}")
         LOGGER.info(f"Initiating training with {'mixed-precision' if MIXED_PRECISION_ENABLED else 'single-precision'}...")
         LOGGER.info(f"Using model config: {model_config}")
+        if finetuning_config.finetune:
+            LOGGER.info("Finetuning pretrained model")
+            if finetuning_config.lora:
+                LOGGER.info("Using LoRA for finetuning")
+            LOGGER.info(f"Using finetuning config: {finetuning_config}")
         LOGGER.info(f"Model size: {sum(p.numel() for p in model.parameters()) * 4 / (1024 ** 2):.2f}MB")
         LOGGER.info(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
-    train(training_config, model, train_dataset, val_dataset, args.is_distributed, state)
+    train(training_config, model, train_dataset, val_dataset, args.is_distributed, state, finetuning_config)
 
     if args.is_distributed:
         dist.destroy_process_group()

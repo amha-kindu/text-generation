@@ -6,6 +6,7 @@ import numpy
 import random
 import logging
 import tempfile
+from typing import List
 
 random.seed(4321)
 torch.manual_seed(4321)
@@ -165,7 +166,6 @@ class TrainingConfig(Config):
         self.warmup_steps: int = kwargs.get("warmup_steps", 1000)
         self.save_every: int = kwargs.get("save_every", 1000)
         self.validate_every: int = kwargs.get("validate_every", 100)
-        self.validation_samples: int = kwargs.get("validation_samples", 20)
         self.training_data: str = kwargs.get("training_data", None)
         self.validation_data: str = kwargs.get("validation_data", None)
         
@@ -176,8 +176,35 @@ class TrainingConfig(Config):
             raise FileNotFoundError(f"File '{self.validation_data}' does not exist")
 
 
+class FinetuningConfig(Config):
+    def __init__(self, **kwargs):
+        self.finetune: bool = kwargs.get("finetune", False)
+        self.lora_targets: dict = kwargs.get("lora_targets", {})
+        self.trainable_params: List[str] = kwargs.get("trainable_params", {})
+        self.lora: bool = kwargs.get("lora", False)
+        self.lora_rank: int = kwargs.get("lora_rank", 16)
+        self.lora_alpha: int = kwargs.get("lora_alpha", 32)
+        self.dropout: float = kwargs.get("lora_dropout", 0.05)
+        self.sampler_alpha: float = kwargs.get("sampler_alpha", 0.5)
+
+
+class InferenceConfig(Config):
+    def __init__(self, **kwargs):
+        self.top_k: int = kwargs.get("top_k", 0)
+        self.top_p: float = kwargs.get("top_p", 1.0)
+        self.temperature: float = kwargs.get("temperature", 1.0)
+        self.max_temp: float = kwargs.get("max_temp", 2.0)
+        self.repetition_penalty: float = kwargs.get("repetition_penalty", 1.15)
+        self.presence_penalty: float = kwargs.get("presence_penalty", 0.0)
+        self.freq_penalty: float = kwargs.get("freq_penalty", 0.3)
+        self.no_repeat_ngram_size: int = kwargs.get("no_repeat_ngram_size", 3)
+        self.rep_window: int = kwargs.get("rep_window", 200)
+        
+
 DEFAULT_TRAINING_CONFIG = TrainingConfig()
 DEFAULT_MODEL_CONFIG = ModelConfig()
+DEFAULT_FINETUNING_CONFIG = FinetuningConfig()
+DEFAULT_INFERENCE_CONFIG = InferenceConfig()
 
 if __name__ == '__main__':
     import argparse

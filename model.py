@@ -2,18 +2,20 @@ import math
 import torch
 from config import *
 import torch.nn as nn
+from lora import LoRAdapter
 
 
 class Embedding(nn.Module):
-    def __init__(self, embed_dim: int, vocab_size: int) -> None:
+    def __init__(self, embed_dim: int, vocab_size: int, dropout: float = 0) -> None:
         super().__init__()
         self.embed_dim = embed_dim
+        self.dropout = nn.Dropout(dropout)
         self.embedding = nn.Embedding(vocab_size, embed_dim)
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.embedding(x)
+        return self.dropout(self.embedding(x))
 
 
 class PositionEncoder(nn.Module):
@@ -167,7 +169,7 @@ class GPTmodel(nn.Module):
         )
 
         self.decoders = nn.ModuleList([DecoderBlock(embed_dim, ff_dim, dropout, heads) for _ in range(n_blocks)])
-        self.embedding = Embedding(embed_dim, vocab_size)
+        self.embedding = Embedding(embed_dim, vocab_size, dropout)
         self.position_encoder = PositionEncoder(seq_len, embed_dim, dropout)
         self.projection = Projection(embed_dim, vocab_size)
 
@@ -196,20 +198,92 @@ class GPTmodel(nn.Module):
         x = self._decode(x, mask)
         return self._project(x)
     
+    def apply_lora(self, finetuning_config: FinetuningConfig):
+        def _update_linear_layer(submodule: nn.Module, layer_name: str):
+            linear_layer = submodule.get_submodule(layer_name)
+            if not isinstance(linear_layer, nn.Linear):
+                raise ValueError(f"{layer_name} must be nn.Linear")
+            adapter = LoRAdapter(
+                linear_layer,
+                rank=finetuning_config.lora_rank,
+                alpha=finetuning_config.lora_alpha,
+                dropout=finetuning_config.dropout
+            )            
+            setattr(submodule, layer_name, adapter)
+        
+        for submodule_name, data in finetuning_config.lora_targets.items():
+            if data["type"] == 'ModuleList':
+                for idx  in data['indices']:
+                    for target in data['submodules']:
+                        temp = target.split(".")
+                        if len(temp) > 1:
+                            layer_name, layer_parent = temp[-1], ".".join(temp[:-1])
+                            submodule = self.get_submodule(f"{submodule_name}.{idx}.{layer_parent}")
+                        else:
+                            layer_name = temp[0]
+                            submodule = self.get_submodule(f"{submodule_name}.{idx}")
+                        _update_linear_layer(submodule, layer_name)
+            elif data["type"] == 'Module':
+                for target in data['submodules']:
+                    temp = target.split(".")
+                    if len(temp) > 1:
+                        layer_name, layer_parent = temp[-1], ".".join(temp[:-1])
+                        submodule = self.get_submodule(f"{submodule_name}.{layer_parent}")
+                    else:
+                        layer_name = temp[0]
+                        submodule = self.get_submodule(f"{submodule_name}")                    
+                    _update_linear_layer(submodule, layer_name)
+            else:
+                raise ValueError(f"Unknown type: {data['type']}")
+
+    def set_trainable_params(self, trainable_modules: dict, for_inference: bool = False):
+        trainables_params = set()
+        if trainable_modules and not for_inference:
+            for submodule_name, data in trainable_modules.items():
+                if data["type"] == 'ModuleList':
+                    for idx in data['indices']:
+                        if len(data['submodules']) == 0:
+                            trainables_params.add(f"{submodule_name}.{idx}")
+                        for target in data['submodules']:
+                            temp = target.split(".")
+                            if len(temp) > 1:
+                                layer_name, layer_parent = temp[-1], ".".join(temp[:-1])
+                                trainables_params.add(f"{submodule_name}.{idx}.{layer_parent}.{layer_name}")
+                            else:
+                                trainables_params.add(f"{submodule_name}.{idx}.{temp[0]}")
+                elif data["type"] == 'Module':
+                    if len(data['submodules']) == 0:
+                        trainables_params.add(f"{submodule_name}")
+                    for target in data['submodules']:
+                        temp = target.split(".")
+                        if len(temp) > 1:
+                            layer_name, layer_parent = temp[-1], ".".join(temp[:-1])
+                            trainables_params.add(f"{submodule_name}.{layer_parent}.{layer_name}")
+                        else:
+                            trainables_params.add(f"{submodule_name}.{temp[0]}")
+                else:
+                    raise ValueError(f"Unknown type: {data['type']}")
+        
+        for param_name, param in self.named_parameters():
+            param.requires_grad = any(p in param_name for p in trainables_params)
+    
     @staticmethod
     def build(
-        params: ModelConfig,
-        weights: dict = {}
+        config: ModelConfig,
+        finetuning_config: FinetuningConfig=DEFAULT_FINETUNING_CONFIG,
+        weights: dict = {},
+        lora_weights: dict = {},
+        for_inference: bool = False
     ):
         model = GPTmodel(
-            n_blocks=params.n_blocks,
-            embed_dim=params.embed_dim,
-            vocab_size=params.vocab_size,
-            ff_dim=params.ff_dim,
-            dropout=params.dropout,
-            heads=params.heads,
-            seq_len=params.seq_len
-        )        
+            n_blocks=config.n_blocks,
+            embed_dim=config.embed_dim,
+            vocab_size=config.vocab_size,
+            ff_dim=config.ff_dim,
+            dropout=config.dropout,
+            heads=config.heads,
+            seq_len=config.seq_len
+        )
 
         if weights:
             model.load_state_dict(weights)
@@ -226,5 +300,20 @@ class GPTmodel(nn.Module):
                     nn.init.zeros_(m.bias)
             
             model.apply(init_weights)
+        
+        if finetuning_config.finetune:
+            model.set_trainable_params(finetuning_config.trainable_params, for_inference)
+
+        if finetuning_config.lora or lora_weights:
+            model.apply_lora(finetuning_config)
+            
+        if lora_weights:
+            model.load_state_dict(lora_weights, strict=False)
+            
+        if for_inference:
+            model.eval()
+            for module in model.modules():
+                if isinstance(module, LoRAdapter):
+                    module.merge()
 
         return model
