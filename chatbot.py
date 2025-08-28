@@ -75,6 +75,7 @@ if __name__ == '__main__':
     parser.add_argument("--frequency-penalty", type=float, default=DEFAULT_INFERENCE_CONFIG.freq_penalty, help="Frequency penalty strength")
     parser.add_argument("--no-repeat-ngram-size", type=int, default=DEFAULT_INFERENCE_CONFIG.no_repeat_ngram_size, help="No repeat n-gram size")
     parser.add_argument("--repeat-window", type=int, default=DEFAULT_INFERENCE_CONFIG.rep_window, help="Repeat window size")
+    parser.add_argument("--kv-cache-size", type=int, default=DEFAULT_INFERENCE_CONFIG.kv_cache_size, help="KV cache size")
     parser.add_argument("--checkpoint", type=str, required=True, help="File path to load saved checkpoint")
     parser.add_argument("--lora-checkpoint", default="", type=str, help="Path to LoRA adapters")
     parser.add_argument("--finetuned-checkpoint", default="", type=str, help="Path to finetuned checkpoint")

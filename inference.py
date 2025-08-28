@@ -9,6 +9,7 @@ import sentencepiece as spm
 from collections import Counter
 import torch.nn.functional as F
 from dataset import TextDataset
+from cache import SlidingKVCache
 from preprocessor import AmharicPreprocessor
 
 
@@ -19,6 +20,11 @@ class GptInferenceEngine:
         self.tokenizer = tokenizer
         self.preprocessor = AmharicPreprocessor()
         self.max_len = self.model.config.seq_len
+        self.use_kv_cache = config.kv_cache_size > 0
+        self.kv_caches = [
+            SlidingKVCache(config.kv_cache_size) for _ in range(self.model.config.n_blocks) \
+            if self.use_kv_cache
+        ]
         
         self.top_k = config.top_k
         self.top_p = config.top_p
@@ -91,7 +97,7 @@ class GptInferenceEngine:
                         
             with torch.autocast(device_type=DEVICE.type, enabled=MIXED_PRECISION_ENABLED):
                 # (1, SEQ_LEN, VOCAB_SIZE)
-                logits = self.model(decoder_input, decoder_mask)
+                logits = self.model(decoder_input, decoder_mask, self.use_kv_cache, self.kv_caches)
 
             # (1, VOCAB_SIZE)
             # Take logits for the last position and apply temperature scaling
@@ -152,6 +158,7 @@ if __name__ == '__main__':
     parser.add_argument("--frequency-penalty", type=float, default=DEFAULT_INFERENCE_CONFIG.freq_penalty, help="Frequency penalty strength")
     parser.add_argument("--no-repeat-ngram-size", type=int, default=DEFAULT_INFERENCE_CONFIG.no_repeat_ngram_size, help="No repeat n-gram size")
     parser.add_argument("--repeat-window", type=int, default=DEFAULT_INFERENCE_CONFIG.rep_window, help="Repeat window size")
+    parser.add_argument("--kv-cache-size", type=int, default=DEFAULT_INFERENCE_CONFIG.kv_cache_size, help="KV cache size")
     parser.add_argument("--checkpoint", type=str, required=True, help="File path to load saved checkpoint")
     parser.add_argument("--tokenizer", type=str, required=True, help="File path to load SentencePiece tokenizer")
 

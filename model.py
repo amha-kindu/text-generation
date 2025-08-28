@@ -3,6 +3,7 @@ import torch
 from config import *
 import torch.nn as nn
 from lora import LoRAdapter
+from cache import SlidingKVCache
 
 
 class Embedding(nn.Module):
@@ -67,11 +68,22 @@ class MultiHeadAttentionBlock(nn.Module):
     
     # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
-    def forward(self, key: torch.Tensor, query: torch.Tensor, value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, key: torch.Tensor, query: torch.Tensor, value: torch.Tensor, mask: torch.Tensor, use_cache: bool = False, kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         # (N_BATCHES, SEQ_LEN, EMBED_DIM) @ (EMBED_DIM, EMBED_DIM) --> (N_BATCHES, SEQ_LEN, EMBED_DIM)
         key: torch.Tensor = self.Wk(key)
         query: torch.Tensor = self.Wq(query)
         value: torch.Tensor = self.Wv(value)
+                
+        if use_cache:
+            if kv_cache is not None:
+                # (N_BATCHES, CACHE_SIZE, EMBED_DIM)
+                key_past, value_past = kv_cache
+                
+                # (N_BATCHES, CACHE_SIZE + SEQ_LEN, EMBED_DIM)
+                key = torch.cat([key_past, key], dim=2)
+                value = torch.cat([value_past, value], dim=2)
+            kv_cache = key, value
 
         # (N_BATCHES, SEQ_LEN, EMBED_DIM) --> (N_BATCHES, SEQ_LEN, HEADS, d_head) --> (N_BATCHES, HEADS, SEQ_LEN, d_head)
         query = query.view(query.shape[0], query.shape[1], self.heads, -1).transpose(1, 2)
@@ -109,7 +121,7 @@ class MultiHeadAttentionBlock(nn.Module):
         # (N_BATCHES, SEQ_LEN, head, d_head) -> (N_BATCHES, SEQ_LEN, EMBED_DIM)
         output = output.contiguous().view(value.shape[0], value.shape[2], -1)
         
-        return self.Wo(output)
+        return self.Wo(output), kv_cache
     
 
 class FeedForwardBlock(nn.Module):
@@ -138,10 +150,11 @@ class DecoderBlock(nn.Module):
     
     # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
-    def forward(self, x: torch.Tensor, mask: torch.Tensor):
-        x = x + self.dropout(self.norm1(self.masked_multihead_attention(x, x, x, mask)))
+    def forward(self, x: torch.Tensor, mask: torch.Tensor, use_cache: bool = False, kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None):
+        x_update, kv_cache = self.masked_multihead_attention(x, x, x, mask, use_cache, kv_cache)
+        x = x + self.dropout(self.norm1(x_update))
         x = x + self.dropout(self.norm2(self.feed_forward(x)))
-        return x
+        return x, kv_cache
 
 
 class Projection(nn.Module):
@@ -186,16 +199,19 @@ class GPTmodel(nn.Module):
     
     # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
-    def _decode(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        for decoder in self.decoders:
-            x = decoder(x, mask)
+    def _decode(self, x: torch.Tensor, mask: torch.Tensor, use_cache: bool = False, kv_caches: list[SlidingKVCache] = []) -> torch.Tensor:
+        for i, decoder in enumerate(self.decoders):
+            kv_cache = None if not use_cache else kv_caches[i].get()
+            x, new_kv_cache = decoder(x, mask, use_cache, kv_cache)
+            if use_cache:
+                kv_caches[i].append(new_kv_cache[0], new_kv_cache[1])
         return x
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN), mask -> (1, SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: torch.Tensor, use_cache: bool = False, kv_caches: list[SlidingKVCache] = []) -> torch.Tensor:
         x = self._embed_and_encode_position(x)
-        x = self._decode(x, mask)
+        x = self._decode(x, mask, use_cache, kv_caches)
         return self._project(x)
     
     def apply_lora(self, finetuning_config: FinetuningConfig):

@@ -199,6 +199,7 @@ class InferenceConfig(Config):
         self.freq_penalty: float = kwargs.get("freq_penalty", 0.3)
         self.no_repeat_ngram_size: int = kwargs.get("no_repeat_ngram_size", 3)
         self.rep_window: int = kwargs.get("rep_window", 200)
+        self.kv_cache_size: int = kwargs.get("kv_cache_size", 0)
         
 
 DEFAULT_TRAINING_CONFIG = TrainingConfig()
