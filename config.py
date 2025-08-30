@@ -6,6 +6,7 @@ import numpy
 import random
 import logging
 import tempfile
+import subprocess
 from typing import List
 
 random.seed(4321)
@@ -61,6 +62,21 @@ stream_handler.setFormatter(PartialFormatter(
 ))
 LOGGER.addHandler(stream_handler)
 
+def get_git_commit():
+    try:
+        return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).decode().strip()
+    except Exception:
+        return "unknown"
+
+ENV = {
+    "python": sys.platform,
+    "torch": torch.__version__,
+    "cuda_available": torch.cuda.is_available(),
+    "cuda_version": torch.version.cuda if torch.cuda.is_available() else None,
+    "cudnn": torch.backends.cudnn.version() if torch.cuda.is_available() else None,
+    "git_commit": get_git_commit(),
+}
+
 
 class Config:
     def to_dict(self):
@@ -75,9 +91,10 @@ class Config:
     def __repr__(self):
         return f"{self.__class__.__name__}({self.__dict__})"
     
-    def update(self, **kwargs):
+    def update(self, skip: list[str] = [], **kwargs):
         for key, value in kwargs.items():
-            if value is not None and hasattr(self, key):
+            if value is not None and hasattr(self, key) \
+                and key not in skip:
                 setattr(self, key, value)
 
 class ModelConfig(Config):
@@ -89,6 +106,15 @@ class ModelConfig(Config):
         self.heads: int = kwargs.get("heads", 8)
         self.dropout: float = kwargs.get("dropout", 0.1)
         self.seq_len: int = kwargs.get("seq_len", 50)
+
+
+class ModelWithLoRAConfig(ModelConfig):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.lora_rank: int = kwargs.get("lora_rank", 16)
+        self.lora_alpha: int = kwargs.get("lora_alpha", 32)
+        self.lora_targets: dict = kwargs.get("lora_targets", {})
+        self.lora_dropout: float = kwargs.get("lora_dropout", 0.05)
 
 
 def get_line_count(file_path):
@@ -146,11 +172,11 @@ class TrainingConfig(Config):
         kwargs = { k: v for k, v in kwargs.items() if v is not None}
         self.samples_per_epoch = None
         self.updates_per_epoch = None
+        self.workers: int = kwargs.get("dl-workers", 0)
         self.epochs: int = kwargs.get("epochs", 10)
         self.batch_size: int = kwargs.get("batch_size", 64)
         self.grad_accum_steps: int = kwargs.get("grad_accum_steps", 1)
         self.init_lr: float = kwargs.get("init_lr", 2e-04)
-        self.final_lr: float = kwargs.get("final_lr", 0)
         self.weight_decay: float = kwargs.get("weight_decay", 0.01)
         self.beta1: float = kwargs.get("beta1", 0.9)
         self.beta2: float = kwargs.get("beta2", 0.999)
@@ -168,24 +194,26 @@ class TrainingConfig(Config):
         self.validate_every: int = kwargs.get("validate_every", 100)
         self.training_data: str = kwargs.get("training_data", None)
         self.validation_data: str = kwargs.get("validation_data", None)
+        self.finetuning: bool = kwargs.get("finetuning", False)
+        
+        if self.finetuning:
+            self.sampler_alpha: float = kwargs.get("sampler_alpha", 0.5)
         
         if self.training_data and not os.path.isfile(self.training_data):
             raise FileNotFoundError(f"File '{self.training_data}' does not exist")
         
         if self.validation_data and not os.path.isfile(self.validation_data):
             raise FileNotFoundError(f"File '{self.validation_data}' does not exist")
-
-
-class FinetuningConfig(Config):
-    def __init__(self, **kwargs):
-        self.finetune: bool = kwargs.get("finetune", False)
-        self.lora_targets: dict = kwargs.get("lora_targets", {})
-        self.trainable_params: List[str] = kwargs.get("trainable_params", {})
-        self.lora: bool = kwargs.get("lora", False)
-        self.lora_rank: int = kwargs.get("lora_rank", 16)
-        self.lora_alpha: int = kwargs.get("lora_alpha", 32)
-        self.dropout: float = kwargs.get("lora_dropout", 0.05)
-        self.sampler_alpha: float = kwargs.get("sampler_alpha", 0.5)
+        
+class TrainingState:
+    def __init__(self, epoch: int, global_step: int, training_loss: float, validation_loss: float, best_val_loss: float, optimizer_state: dict, lr_scheduler_state: dict):
+        self.epoch = epoch
+        self.global_step = global_step
+        self.training_loss = training_loss
+        self.validation_loss = validation_loss
+        self.best_val_loss = best_val_loss
+        self.optimizer_state = optimizer_state
+        self.lr_scheduler_state = lr_scheduler_state
 
 
 class InferenceConfig(Config):
@@ -204,7 +232,6 @@ class InferenceConfig(Config):
 
 DEFAULT_TRAINING_CONFIG = TrainingConfig()
 DEFAULT_MODEL_CONFIG = ModelConfig()
-DEFAULT_FINETUNING_CONFIG = FinetuningConfig()
 DEFAULT_INFERENCE_CONFIG = InferenceConfig()
 
 if __name__ == '__main__':

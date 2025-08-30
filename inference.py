@@ -2,14 +2,15 @@ import time
 import torch
 import argparse
 import traceback
-from config import *
-from model import GPTmodel
 from typing import Iterator
 import sentencepiece as spm
 from collections import Counter
 import torch.nn.functional as F
-from dataset import TextDataset
+
+from config import *
+from model import GPTmodel
 from cache import SlidingKVCache
+from utils import get_lookback_mask
 from preprocessor import AmharicPreprocessor
 
 
@@ -93,7 +94,7 @@ class GptInferenceEngine:
                 dtype=torch.int64
             ).to(DEVICE).unsqueeze(0)
                         
-            decoder_mask = TextDataset.lookback_mask(len(token_ids)).to(DEVICE)
+            decoder_mask = get_lookback_mask(len(token_ids)).to(DEVICE)
                         
             with torch.autocast(device_type=DEVICE.type, enabled=MIXED_PRECISION_ENABLED):
                 # (1, SEQ_LEN, VOCAB_SIZE)

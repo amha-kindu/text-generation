@@ -1,7 +1,8 @@
 import math
 import torch
-from config import *
 import torch.nn as nn
+
+from config import *
 from lora import LoRAdapter
 from cache import SlidingKVCache
 
@@ -66,9 +67,16 @@ class MultiHeadAttentionBlock(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
     
-    # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM), mask -> (1, SEQ_LEN, SEQ_LEN)
+    # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM), mask -> (SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
-    def forward(self, key: torch.Tensor, query: torch.Tensor, value: torch.Tensor, mask: torch.Tensor, use_cache: bool = False, kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None
+    def forward(
+        self,
+        key: torch.Tensor,
+        query: torch.Tensor,
+        value: torch.Tensor,
+        mask: torch.Tensor,
+        use_cache: bool = False,
+        kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         # (N_BATCHES, SEQ_LEN, EMBED_DIM) @ (EMBED_DIM, EMBED_DIM) --> (N_BATCHES, SEQ_LEN, EMBED_DIM)
         key: torch.Tensor = self.Wk(key)
@@ -148,9 +156,15 @@ class DecoderBlock(nn.Module):
         self.feed_forward = FeedForwardBlock(embed_dim, ff_dim, dropout)
         self.dropout = nn.Dropout(dropout)
     
-    # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM), mask -> (1, SEQ_LEN, SEQ_LEN)
+    # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM), mask -> (SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
-    def forward(self, x: torch.Tensor, mask: torch.Tensor, use_cache: bool = False, kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None):
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: torch.Tensor,
+        use_cache: bool = False,
+        kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None
+    ) -> tuple[torch.Tensor, SlidingKVCache | None]:
         x_update, kv_cache = self.masked_multihead_attention(x, x, x, mask, use_cache, kv_cache)
         x = x + self.dropout(self.norm1(x_update))
         x = x + self.dropout(self.norm2(self.feed_forward(x)))
@@ -169,22 +183,14 @@ class Projection(nn.Module):
 
 
 class GPTmodel(nn.Module):
-    def __init__(self, n_blocks: int, embed_dim: int, vocab_size: int, ff_dim: int, dropout: float, heads: int, seq_len: int):
+    def __init__(self, config: ModelConfig):
         super().__init__()
-        self.config = ModelConfig(
-            vocab_size=vocab_size,
-            n_blocks=n_blocks,
-            embed_dim=embed_dim,
-            dropout=dropout,
-            seq_len=seq_len,
-            heads=heads,
-            ff_dim=ff_dim,
-        )
+        self.config: ModelConfig = config
 
-        self.decoders = nn.ModuleList([DecoderBlock(embed_dim, ff_dim, dropout, heads) for _ in range(n_blocks)])
-        self.embedding = Embedding(embed_dim, vocab_size, dropout)
-        self.position_encoder = PositionEncoder(seq_len, embed_dim, dropout)
-        self.projection = Projection(embed_dim, vocab_size)
+        self.decoders = nn.ModuleList([DecoderBlock(config.embed_dim, config.ff_dim, config.dropout, config.heads) for _ in range(config.n_blocks)])
+        self.embedding = Embedding(config.embed_dim, config.vocab_size, config.dropout)
+        self.position_encoder = PositionEncoder(config.seq_len, config.embed_dim, config.dropout)
+        self.projection = Projection(config.embed_dim, config.vocab_size)
 
     # Input shape: x -> (N_BATCHES, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
@@ -197,9 +203,15 @@ class GPTmodel(nn.Module):
     def _project(self, x: torch.Tensor) -> torch.Tensor:
         return self.projection(x)
     
-    # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM), mask -> (1, SEQ_LEN, SEQ_LEN)
+    # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM), mask -> (SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
-    def _decode(self, x: torch.Tensor, mask: torch.Tensor, use_cache: bool = False, kv_caches: list[SlidingKVCache] = []) -> torch.Tensor:
+    def _decode(
+        self,
+        x: torch.Tensor,
+        mask: torch.Tensor,
+        use_cache: bool = False,
+        kv_caches: list[SlidingKVCache] = []
+    ) -> torch.Tensor:
         for i, decoder in enumerate(self.decoders):
             kv_cache = None if not use_cache else kv_caches[i].get()
             x, new_kv_cache = decoder(x, mask, use_cache, kv_cache)
@@ -207,27 +219,33 @@ class GPTmodel(nn.Module):
                 kv_caches[i].append(new_kv_cache[0], new_kv_cache[1])
         return x
 
-    # Input shape: x -> (N_BATCHES, SEQ_LEN), mask -> (1, SEQ_LEN, SEQ_LEN)
+    # Input shape: x -> (N_BATCHES, SEQ_LEN), mask -> (SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
-    def forward(self, x: torch.Tensor, mask: torch.Tensor, use_cache: bool = False, kv_caches: list[SlidingKVCache] = []) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor, 
+        mask: torch.Tensor,
+        use_cache: bool = False,
+        kv_caches: list[SlidingKVCache] = []
+    ) -> torch.Tensor:
         x = self._embed_and_encode_position(x)
         x = self._decode(x, mask, use_cache, kv_caches)
         return self._project(x)
     
-    def apply_lora(self, finetuning_config: FinetuningConfig):
+    def apply_lora(self, targets: dict, rank: int, alpha: float, dropout: float):
         def _update_linear_layer(submodule: nn.Module, layer_name: str):
             linear_layer = submodule.get_submodule(layer_name)
             if not isinstance(linear_layer, nn.Linear):
                 raise ValueError(f"{layer_name} must be nn.Linear")
             adapter = LoRAdapter(
                 linear_layer,
-                rank=finetuning_config.lora_rank,
-                alpha=finetuning_config.lora_alpha,
-                dropout=finetuning_config.dropout
+                rank=rank,
+                alpha=alpha,
+                dropout=dropout
             )            
             setattr(submodule, layer_name, adapter)
         
-        for submodule_name, data in finetuning_config.lora_targets.items():
+        for submodule_name, data in targets.items():
             if data["type"] == 'ModuleList':
                 for idx  in data['indices']:
                     for target in data['submodules']:
@@ -251,58 +269,24 @@ class GPTmodel(nn.Module):
                     _update_linear_layer(submodule, layer_name)
             else:
                 raise ValueError(f"Unknown type: {data['type']}")
-
-    def set_trainable_params(self, trainable_modules: dict, for_inference: bool = False):
-        trainables_params = set()
-        if trainable_modules and not for_inference:
-            for submodule_name, data in trainable_modules.items():
-                if data["type"] == 'ModuleList':
-                    for idx in data['indices']:
-                        if len(data['submodules']) == 0:
-                            trainables_params.add(f"{submodule_name}.{idx}")
-                        for target in data['submodules']:
-                            temp = target.split(".")
-                            if len(temp) > 1:
-                                layer_name, layer_parent = temp[-1], ".".join(temp[:-1])
-                                trainables_params.add(f"{submodule_name}.{idx}.{layer_parent}.{layer_name}")
-                            else:
-                                trainables_params.add(f"{submodule_name}.{idx}.{temp[0]}")
-                elif data["type"] == 'Module':
-                    if len(data['submodules']) == 0:
-                        trainables_params.add(f"{submodule_name}")
-                    for target in data['submodules']:
-                        temp = target.split(".")
-                        if len(temp) > 1:
-                            layer_name, layer_parent = temp[-1], ".".join(temp[:-1])
-                            trainables_params.add(f"{submodule_name}.{layer_parent}.{layer_name}")
-                        else:
-                            trainables_params.add(f"{submodule_name}.{temp[0]}")
-                else:
-                    raise ValueError(f"Unknown type: {data['type']}")
-        
-        for param_name, param in self.named_parameters():
-            param.requires_grad = any(p in param_name for p in trainables_params)
     
     @staticmethod
     def build(
-        config: ModelConfig,
-        finetuning_config: FinetuningConfig=DEFAULT_FINETUNING_CONFIG,
-        weights: dict = {},
-        lora_weights: dict = {},
-        for_inference: bool = False
+        config: ModelConfig | ModelWithLoRAConfig,
+        weights: dict = {}
     ):
-        model = GPTmodel(
-            n_blocks=config.n_blocks,
-            embed_dim=config.embed_dim,
-            vocab_size=config.vocab_size,
-            ff_dim=config.ff_dim,
-            dropout=config.dropout,
-            heads=config.heads,
-            seq_len=config.seq_len
-        )
+        model = GPTmodel(config)
+        
+        if isinstance(config, ModelWithLoRAConfig):
+            model.apply_lora(
+                targets=config.lora_targets,
+                rank=config.lora_rank,
+                alpha=config.lora_alpha,
+                dropout=config.lora_dropout
+            )
 
         if weights:
-            model.load_state_dict(weights)
+            model.load_state_dict(weights, strict=not isinstance(config, ModelWithLoRAConfig))
         else:
             def init_weights(m):
                 if isinstance(m, nn.Linear):
@@ -316,20 +300,5 @@ class GPTmodel(nn.Module):
                     nn.init.zeros_(m.bias)
             
             model.apply(init_weights)
-        
-        if finetuning_config.finetune:
-            model.set_trainable_params(finetuning_config.trainable_params, for_inference)
-
-        if finetuning_config.lora or lora_weights:
-            model.apply_lora(finetuning_config)
-            
-        if lora_weights:
-            model.load_state_dict(lora_weights, strict=False)
-            
-        if for_inference:
-            model.eval()
-            for module in model.modules():
-                if isinstance(module, LoRAdapter):
-                    module.merge()
 
         return model

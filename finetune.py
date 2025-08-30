@@ -7,26 +7,20 @@ import torch.nn as nn
 from tqdm import tqdm
 import sentencepiece as spm
 from datetime import datetime
-import torch.distributed as dist
-from torch.utils.data import DistributedSampler
-from torch.nn.parallel import DistributedDataParallel
 
 from config import *
 from model import GPTmodel
 from tensorboard_logger import TensorboardLogger
-from dataset import ShardedDataset, StreamingTextDataset, TextDataset, IDataset
-from utils import EarlyStopping, get_lookback_mask, log_confidence_metrics, save_checkpoint, validate
+from dataset import MultiTaskDataset, ShardedMultiTaskDataset,TemperatureMixSampler, FineTuningDataset, IDataset
+from utils import EarlyStopping, get_lookback_mask, log_confidence_metrics, save_checkpoint, set_trainable_params, validate
 
 
-def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_dataset: ShardedDataset, is_distributed: bool = False, training_state: TrainingState | None = None) -> None:
+def finetune(config: TrainingConfig, model: GPTmodel, finetune_dataset: IDataset, val_dataset: ShardedMultiTaskDataset, training_state: TrainingState | None = None) -> None:
     tb_logger = TensorboardLogger(config.tb_log_dir)
     
     tb_logger.log_text("TrainingConfig", f"```json\n{json.dumps(config.__dict__, indent=2)}\n```", step=0)
     tb_logger.log_text("ModelConfig", f"```json\n{json.dumps(model.config.__dict__, indent=2)}\n```", step=0)
     tb_logger.log_text("Environment", f"```json\n{json.dumps(ENV, indent=2)}\n```", step=0)
-
-    if is_distributed:
-        model = DistributedDataParallel(model, device_ids=[LOCAL_RANK])
 
     # Learning rate scheduler with linear warmup for first warmup_steps
     # followed by inverse square root decay(scaled by the model's dimensionality)
@@ -71,21 +65,19 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
         optimizer.load_state_dict(training_state.optimizer_state)
         scheduler.load_state_dict(training_state.lr_scheduler_state)
 
-    loss_func = nn.CrossEntropyLoss(ignore_index=train_dataset.ignore_index, label_smoothing=config.label_smoothing).to(DEVICE)
-    
-    train_sampler = DistributedSampler(train_dataset, num_replicas=WORLD_SIZE, rank=GLOBAL_RANK, shuffle=True, drop_last=True) if is_distributed else None
-    data_loader = train_dataset.get_loader(config.batch_size, sampler=train_sampler)
+    loss_func = nn.CrossEntropyLoss(ignore_index=finetune_dataset.ignore_index, label_smoothing=config.label_smoothing).to(DEVICE)
+        
+    train_sampler = TemperatureMixSampler(
+        finetune_dataset,
+        alpha=training_config.sampler_alpha,
+        steps_per_epoch=config.batch_size * config.samples_per_epoch,
+    )
+    data_loader = finetune_dataset.get_loader(config.batch_size, sampler=train_sampler)
 
     for epoch in range(initial_epoch, config.epochs):
         data_loader = tqdm(data_loader, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch+1}/{config.epochs}", disable = GLOBAL_RANK != COORDINATOR_RANK, total=config.samples_per_epoch)
         for i, batch in enumerate(data_loader):
             model.train()
-            
-            if is_distributed:
-                train_sampler.set_epoch(epoch)
-            
-            if isinstance(train_dataset, StreamingTextDataset):
-                train_dataset.set_epoch(epoch)
             
             # (N_BATCHES, SEQ_LEN)
             decoder_input: torch.Tensor = batch[0].to(DEVICE)
@@ -107,10 +99,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                     label.view(-1)
                 )
             
-            loss_tensor = batch_loss.detach().clone()
-            if is_distributed:
-                torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
-            accum_loss += loss_tensor.item() / WORLD_SIZE
+            accum_loss += batch_loss.item()
 
             accum_grad = (i + 1) % config.grad_accum_steps != 0 and i + 1 != config.samples_per_epoch
 
@@ -145,13 +134,11 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                 
                 if global_step % config.validate_every == 0:
                     val_loss = validate(
-                        model=model.module if is_distributed else model,
+                        model=model,
                         data_loader=val_dataset.next_loader(config.batch_size),
                         loss_func=loss_func
                     )
-                    if is_distributed:
-                        torch.distributed.all_reduce(val_loss, op=torch.distributed.ReduceOp.SUM)
-                    avg_val_loss = val_loss.item() / WORLD_SIZE
+                    avg_val_loss = val_loss.item()
                     
                     if validation_loss == 0:
                         validation_loss = avg_val_loss
@@ -160,12 +147,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                     
                     if early_stopping(validation_loss):
                         LOGGER.info(f"Early stopping triggered at epoch {epoch + 1}; avg val loss {early_stopping.best_loss:.4f} did not decrease significantly for {early_stopping.patience} consecutive weight updates")
-                        if is_distributed:
-                            dist.barrier()
-                            dist.destroy_process_group()
-                            exit(-1)
-                        else:
-                            break                        
+                        break
                 
                 if GLOBAL_RANK == COORDINATOR_RANK:
                     if global_step % config.validate_every == 0:
@@ -180,11 +162,11 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                         "val_loss": f"{validation_loss:6.3f}"
                     })
                     
-                    log_confidence_metrics(logits.detach(), label.detach(), tb_logger, global_step, train_dataset.ignore_index)
+                    log_confidence_metrics(logits.detach(), label.detach(), tb_logger, global_step, finetune_dataset.ignore_index)
                     
                     if global_step and global_step % config.save_every == 0:
                         save_checkpoint(
-                            model=model.module if is_distributed else model,
+                            model=model,
                             global_step=global_step,
                             config=config,
                             training_state=TrainingState(
@@ -199,26 +181,21 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
                         )
 
                 global_step += 1
-
-    if is_distributed:
-        dist.barrier()
+    
     tb_logger.close()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train a GPT model")
-    parser.add_argument("--is-distributed", action="store_true", help="Device to train the model on")
+    parser = argparse.ArgumentParser(description="Finetune a pretrained GPT model")
     parser.add_argument("--training-data", required=True, type=str, help="Path to the training dataset")
     parser.add_argument("--validation-data", required=True, type=str, help="Path to the validation dataset")
     parser.add_argument("--tokenizer", type=str, required=True, help="The path to the trained tokenizer model")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint")
-    parser.add_argument("--init-weights", type=str, help="Path to checkpoint with weights for initialization")
     parser.add_argument("--batch-size", type=int, help="Batch size")
     parser.add_argument("--grad-accum-steps", type=int, help="Gradient accumulation steps")
     parser.add_argument("--warmup-steps", type=int, help="Number of warmup steps")
     parser.add_argument("--save-every", type=int, help="Number of weight updates between checkpoints")
     parser.add_argument("--validate-every", type=int, help="Number of weight updates between validations")
-    parser.add_argument("--init-lr", type=float, help="Initial learning rate")
     parser.add_argument("--weight-decay", type=float, help="L2 regularization coefficient")
     parser.add_argument("--beta1", type=float, help="Adam optimizer beta1")
     parser.add_argument("--beta2", type=float, help="Adam optimizer beta2")
@@ -231,53 +208,69 @@ if __name__ == "__main__":
     parser.add_argument("--tb-log-dir", type=str, help="Initial learning rate")
     parser.add_argument("--epochs", type=int, help="Number of epochs to train the model")
     parser.add_argument("--seq-len", type=int, help="Sequence length of the input")
-    parser.add_argument("--embed-dim", type=int, help="Dimensionality of the model")
-    parser.add_argument("--n-blocks", type=int, help="Number of decoder blocks")
-    parser.add_argument("--heads", type=int, help="Number of attention heads")
-    parser.add_argument("--vocab-size", type=int, help="Vocabulary size to use")
     parser.add_argument("--dropout", type=float, help="Dropout probability")
-    parser.add_argument("--ff-dim", type=int, help="Dimensionality of the feed forward layer")
-    parser.add_argument("--dist-backend", type=str, default="nccl", help="Distributed backend")
-    parser.add_argument("--resume", default=False, action="store_true", help="Resume training from checkpoint")
+    parser.add_argument("--resume", default=False, action="store_true", help="Resume finetuning from checkpoint")
     parser.add_argument("--max-checkpoints-to-keep", type=int, help="Maximum number of checkpoints to keep")
     parser.add_argument("--dl-workers", type=int, help="Number of subprocesses to use for data loading")
+    parser.add_argument("--sampler-alpha", type=float, help="The alpha parameter to use for temperature mix sampler")
+    parser.add_argument("--trainable-params", type=str, help="Path to a json file containing layers to train during finetuning")
+    parser.add_argument("--lora", default=False, action="store_true", help="Flag to use LoRA during finetuning")
+    parser.add_argument("--lora-rank", type=int, help="Size of the low-rank matrices when finetuning with LoRA")
+    parser.add_argument("--lora-alpha", type=int, help="Parameter that scales the LoRA updates when finetuning with LoRA")
+    parser.add_argument("--lora-dropout", type=float, help="The Dropout applied to LoRA's input")
+    parser.add_argument("--lora-targets", type=str, help="Path to a json file containing layers to apply LoRA on")
+    parser.add_argument("--lora-checkpoint", default="", type=str, help="Path to LoRA adapters")
+    parser.add_argument("--finetuned-checkpoint", default="", type=str, help="Path to finetuning checkpoint")
 
     args = parser.parse_args()
     
-    if args.is_distributed:
-        assert torch.cuda.device_count() > 1, "Must have more than one CUDA supporting GPUs to initiate distributed training"
-        assert args.dist_backend in ["nccl", "gloo" "mpi", "ucc"], "Distributed backend must be one of the following: nccl, gloo, mpi or ucc"
+    if args.lora:
+        assert args.lora_targets, "If you want to use LoRA, please provide a path to the LoRA targets"
 
-        dist.init_process_group(backend=args.dist_backend)
-
-    if args.embed_dim and args.heads:
-        assert args.embed_dim % args.heads == 0, "embed_dim must be divisible by heads"
-
-    model_config: ModelConfig = DEFAULT_MODEL_CONFIG
-    model_config.update(**args.__dict__)
+    if not os.path.exists(args.checkpoint):
+        raise FileNotFoundError(f"File {args.checkpoint} does not exist")
+    LOGGER.info(f"Loading checkpoint from '{args.checkpoint}'...")
+    pretraining_checkpoint: dict = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
+    weights: dict = pretraining_checkpoint["weights"]
     
-    training_config: TrainingConfig = DEFAULT_TRAINING_CONFIG
-    training_config.update(**args.__dict__)
-
-    training_state, weights = None, {}
-    if args.init_weights:
-        if not os.path.exists(args.init_weights):
-            raise FileNotFoundError(f"File {args.init_weights} does not exist")
-        LOGGER.info(f"Loading initial weights from '{args.init_weights}'...")
-        checkpoint = torch.load(args.init_weights, map_location=DEVICE, weights_only=True)
-        weights = checkpoint['weights']
-    elif args.resume:
-        if not os.path.exists(args.checkpoint):
-            raise FileNotFoundError(f"File {args.checkpoint} does not exist")
-        LOGGER.info(f"Loading checkpoint from '{args.checkpoint}'...")
-        checkpoint: dict = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
-        weights = checkpoint["weights"]
+    training_config = DEFAULT_TRAINING_CONFIG
+    training_config.update(**args.__dict__, finetuning=True)
+    
+    model_config: ModelConfig = pretraining_checkpoint["model_config"]
+    model_config.update(dropout=args.dropout)
+    
+    if args.lora:
+        assert os.path.exists(args.lora_targets) and os.path.isfile(args.lora_targets), f"File {args.lora_targets} does not exist"
+        with open(args.lora_targets, 'r') as f:
+            args.lora_targets = json.load(f)
         
-        model_config: ModelConfig = checkpoint["model_config"]
-        model_config.update(dropout=args.dropout)
+        model_config = ModelWithLoRAConfig(**model_config.to_dict())
+        model_config.update(**args.__dict__)
+        
+        training_config.checkpoint = training_config.checkpoint.replace(".pt", f"-lora-adapters-{model_config.lora_rank}R-{model_config.lora_alpha}SF.pt")
+    else:
+        training_config.checkpoint = training_config.checkpoint.replace(".pt", f"-finetuned.pt")
+        
+    training_state = None
+    if args.resume:
+        if args.lora_checkpoint:
+            if not os.path.exists(args.lora_checkpoint):
+                raise FileNotFoundError(f"File {args.lora_checkpoint} does not exist")
+            LOGGER.info(f"Loading lora checkpoint from '{args.lora_checkpoint}'...")
+            checkpoint: dict = torch.load(args.lora_checkpoint, map_location=DEVICE, weights_only=False)
+        else:
+            if not os.path.exists(args.finetuned_checkpoint):
+                raise FileNotFoundError(f"File {args.finetuned_checkpoint} does not exist")
+            LOGGER.info(f"Loading finetuning checkpoint from '{args.finetuned_checkpoint}'...")
+            checkpoint: dict = torch.load(args.finetuned_checkpoint, map_location=DEVICE, weights_only=False)
+        
+        weights.update(checkpoint["weights"])
         
         training_config: TrainingConfig = checkpoint["training_config"]
         training_config.update(skip=['checkpoint', 'training_data', 'validation_data'], **args.__dict__)
+        
+        model_config: ModelConfig | ModelWithLoRAConfig = checkpoint["model_config"]
+        model_config.update(dropout=args.dropout, lora_dropout=args.lora_dropout)
         
         training_state = checkpoint["training_state"]
     
@@ -285,26 +278,44 @@ if __name__ == "__main__":
     tokenizer = spm.SentencePieceProcessor()
     tokenizer.LoadFromFile(args.tokenizer)
     
-    if os.path.getsize(training_config.training_data) > 200 * 1024 * 1024:
-        if GLOBAL_RANK == COORDINATOR_RANK:
-            LOGGER.info(f"File '{os.path.basename(training_config.training_data)}' too large! streaming file...")
-        train_dataset = StreamingTextDataset(training_config.training_data, tokenizer, model_config.seq_len, training_config.workers)
-        samples = get_line_count(training_config.training_data)
-    else:
-        train_dataset = TextDataset(training_config.training_data, tokenizer, model_config.seq_len, training_config.workers)
-        samples = len(train_dataset)
+    intents = [
+        "qa",
+        "afrisent",
+        "multiturn-dialogue",
+        "amharic_story_generation",
+        "amharic_spellcheck", "other",
+        "masakhanews", "masakhaner", "xlsum_summarization",
+        "xlsum_reverse_summarization", "amharic_title_generation",
+    ]
+    finetune_dataset = MultiTaskDataset(
+        datasets={
+            intent: FineTuningDataset(intent, training_config.training_data, tokenizer, model_config.seq_len) for intent in intents
+        },
+        workers=training_config.workers
+    )
+    samples = len(finetune_dataset)
     
     training_config.samples_per_epoch = math.floor(samples / (training_config.batch_size * WORLD_SIZE))
     training_config.updates_per_epoch = math.floor(training_config.samples_per_epoch / training_config.grad_accum_steps)
     
     shards = training_config.updates_per_epoch // training_config.validate_every
-    val_dataset = ShardedDataset(
+    val_dataset = ShardedMultiTaskDataset(
         shards=shards,
-        dataset=TextDataset(training_config.validation_data, tokenizer, model_config.seq_len),
+        datasets={
+            intent: FineTuningDataset(intent, training_config.validation_data, tokenizer, model_config.seq_len) for intent in intents
+        },
         workers=training_config.workers,
     )
     
     model = GPTmodel.build(model_config, weights).to(DEVICE)
+    
+    trainable_params = model_config.lora_targets
+    if args.trainable_params:
+        assert os.path.exists(args.trainable_params), f"File {args.trainable_params} does not exist"
+        with open(args.trainable_params, 'r') as f:
+            trainable_params = json.load(f)
+    
+    set_trainable_params(model, trainable_params)
     
     if GLOBAL_RANK == COORDINATOR_RANK:
         numerical_configs = {k: v for k, v in training_config.to_dict().items() if not isinstance(v, str)}
@@ -312,10 +323,11 @@ if __name__ == "__main__":
         LOGGER.info(f"Using training config: {numerical_configs}")
         LOGGER.info(f"Initiating training with {'mixed-precision' if MIXED_PRECISION_ENABLED else 'single-precision'}...")
         LOGGER.info(f"Using model config: {model_config}")
+        LOGGER.info("Finetuning pretrained model")
+        if args.lora:
+            LOGGER.info("Using LoRA for finetuning")
+        LOGGER.info(f"Using training config: {training_config}")
         LOGGER.info(f"Model size: {sum(p.numel() for p in model.parameters()) * 4 / (1024 ** 2):.2f}MB")
         LOGGER.info(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
-    train(training_config, model, train_dataset, val_dataset, args.is_distributed, training_state)
-
-    if args.is_distributed:
-        dist.destroy_process_group()
+    finetune(training_config, model, finetune_dataset, val_dataset, training_state)

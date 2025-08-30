@@ -2,10 +2,12 @@ import time
 import torch
 import argparse
 import traceback
-from config import *
-from model import GPTmodel
 from typing import Iterator
 import sentencepiece as spm
+
+from config import *
+from lora import LoRAdapter
+from model import GPTmodel
 from dataset import Conversation
 from inference import GptInferenceEngine
 
@@ -67,21 +69,23 @@ class ChatBot(GptInferenceEngine):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Chat with a finetuned GPT model")    
-    parser.add_argument("--top-k", type=int, default=DEFAULT_INFERENCE_CONFIG.top_k, help="Top k tokens to sample from (set to 0 to disable)")
-    parser.add_argument("--top-p", type=float, default=DEFAULT_INFERENCE_CONFIG.top_p, help="Top p (nucleus) sampling probability (set to 0.0 to disable)")
-    parser.add_argument("--temperature", type=float, default=DEFAULT_INFERENCE_CONFIG.temperature, help="Sampling temperature (t=1.0 for normal sampling, 0<t<1.0 for less random, t>1.0 for more random sampling)")
-    parser.add_argument("--repetition-penalty", type=float, default=DEFAULT_INFERENCE_CONFIG.repetition_penalty, help="Repetition penalty strength")
-    parser.add_argument("--presence-penalty", type=float, default=DEFAULT_INFERENCE_CONFIG.presence_penalty, help="Presence penalty strength")
-    parser.add_argument("--frequency-penalty", type=float, default=DEFAULT_INFERENCE_CONFIG.freq_penalty, help="Frequency penalty strength")
-    parser.add_argument("--no-repeat-ngram-size", type=int, default=DEFAULT_INFERENCE_CONFIG.no_repeat_ngram_size, help="No repeat n-gram size")
-    parser.add_argument("--repeat-window", type=int, default=DEFAULT_INFERENCE_CONFIG.rep_window, help="Repeat window size")
-    parser.add_argument("--kv-cache-size", type=int, default=DEFAULT_INFERENCE_CONFIG.kv_cache_size, help="KV cache size")
-    parser.add_argument("--checkpoint", type=str, required=True, help="File path to load saved checkpoint")
+    parser.add_argument("--top-k", type=int, help="Top k tokens to sample from (set to 0 to disable)")
+    parser.add_argument("--top-p", type=float, help="Top p (nucleus) sampling probability (set to 0.0 to disable)")
+    parser.add_argument("--temperature", type=float, help="Sampling temperature (t=1.0 for normal sampling, 0<t<1.0 for less random, t>1.0 for more random sampling)")
+    parser.add_argument("--repetition-penalty", type=float, help="Repetition penalty strength")
+    parser.add_argument("--presence-penalty", type=float, help="Presence penalty strength")
+    parser.add_argument("--frequency-penalty", type=float, help="Frequency penalty strength")
+    parser.add_argument("--no-repeat-ngram-size", type=int, help="No repeat n-gram size")
+    parser.add_argument("--repeat-window", type=int, help="Repeat window size")
+    parser.add_argument("--kv-cache-size", type=int, help="KV cache size")
     parser.add_argument("--lora-checkpoint", default="", type=str, help="Path to LoRA adapters")
     parser.add_argument("--finetuned-checkpoint", default="", type=str, help="Path to finetuned checkpoint")
+    parser.add_argument("--checkpoint", type=str, required=True, help="File path to load saved checkpoint")
     parser.add_argument("--tokenizer", type=str, required=True, help="File path to load SentencePiece tokenizer")
 
     args = parser.parse_args()
+    
+    assert args.lora_checkpoint or args.finetuned_checkpoint, "At least one of --lora-checkpoint or --finetuned-checkpoint must be specified"
 
     if not os.path.exists(args.checkpoint) and not os.path.isfile(args.checkpoint):
         raise FileNotFoundError(f"File {args.checkpoint} does not exist")
@@ -92,36 +96,35 @@ if __name__ == '__main__':
     LOGGER.info(f"Loading checkpoint from {args.checkpoint}...")
     checkpoint: dict = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
 
-    finetuning_config = DEFAULT_FINETUNING_CONFIG
-    model_config: ModelConfig = checkpoint["model_config"]
-    inference_config: InferenceConfig = InferenceConfig(**args.__dict__)
-        
-    lora_state = {}
+    model_config: ModelConfig = ModelConfig(**checkpoint["model_config"])
+    
+    inference_config: InferenceConfig = DEFAULT_INFERENCE_CONFIG
+    inference_config.update(**args.__dict__)
+    
     if args.lora_checkpoint:
         assert os.path.exists(args.lora_checkpoint) and os.path.isfile(args.lora_checkpoint), f"File {args.lora_checkpoint} does not exist"
         LOGGER.info(f"Loading lora checkpoint from {args.lora_checkpoint}...")
         lora_state: dict = torch.load(args.lora_checkpoint, map_location=DEVICE, weights_only=False)
-        finetuning_config = lora_state["finetuning_config"]
+        checkpoint["weights"].update(lora_state["weights"])
+        model_config = lora_state["model_config"]
     
     if args.finetuned_checkpoint:
         assert os.path.exists(args.finetuned_checkpoint) and os.path.isfile(args.finetuned_checkpoint), f"File {args.finetuned_checkpoint} does not exist"
         LOGGER.info(f"Loading finetuning checkpoint from {args.finetuned_checkpoint}...")
         finetuned_state: dict = torch.load(args.finetuned_checkpoint, map_location=DEVICE, weights_only=False)
         checkpoint["weights"].update(finetuned_state["weights"])
-        finetuning_config = finetuned_state["finetuning_config"]
-        
-    finetuning_config.lora = False
-    finetuning_config.finetune = False
-        
+
     model = GPTmodel.build(
         model_config,
-        finetuning_config=finetuning_config,
         weights=checkpoint["weights"],
-        lora_weights=lora_state.get("weights", None),
-        for_inference=True
     ).to(DEVICE)
-
+    
     model.eval()
+    if args.lora_checkpoint:
+        for module in model.modules():
+            if isinstance(module, LoRAdapter):
+                module.merge()
+
     total_params = sum(p.numel() for p in model.parameters())
     LOGGER.info(f"Device: {DEVICE}")
     LOGGER.info(f"Total Parameters: {total_params}")

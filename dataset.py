@@ -1,38 +1,28 @@
 import json
 import torch
 import random
-from config import *
 from typing import Iterator
 import sentencepiece as spm
 from bisect import bisect_left
 from abc import ABC, abstractmethod
+from torch.utils.data import get_worker_info, Dataset, Subset, IterableDataset, DataLoader, Sampler, ConcatDataset, SequentialSampler
+
+from config import *
+from utils import Conversation
 from preprocessor import AmharicPreprocessor
-from torch.utils.data import get_worker_info
-from torch.utils.data import Dataset, Subset, IterableDataset, DataLoader, Sampler, ConcatDataset, SequentialSampler
 
 
 class IDataset(Dataset, ABC):
     ignore_index = -100
     
-    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int) -> None:
+    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int, workers: int = 0) -> None:
+        self.workers = workers
         self.max_len = max_len
         self.file_path = file_path
         self.tokenizer = tokenizer
         self.preprocessor = AmharicPreprocessor()
 
         self.pad_token = self.tokenizer.pad_id()
-    
-    @staticmethod
-    def lookback_mask(size: int) -> torch.Tensor:
-        # Lower triangular matrix
-        # [[
-        #   [1, 0, ... , 0],
-        #   [1, 1, ... , 0],
-        #   [1, 1, ... , 0],
-        #   [1, 1, ... , 1]
-        # ]]
-        # 1 x size x size
-        return torch.triu(torch.ones(1, size, size), diagonal=1).type(torch.int) == 0
 
     @abstractmethod
     def get_loader(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
@@ -69,8 +59,8 @@ class IDataset(Dataset, ABC):
 
 
 class TextDataset(IDataset):
-    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int) -> None:
-        super().__init__(file_path, tokenizer, max_len)
+    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int, workers: int = 0) -> None:
+        super().__init__(file_path, tokenizer, max_len, workers)
 
         self.texts = []
         self.file = open(file_path, 'r', encoding='utf-8')
@@ -91,43 +81,36 @@ class TextDataset(IDataset):
         return len(self.texts)
 
     def get_loader(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
-        return DataLoader(self, batch_size, shuffle=(sampler is None), sampler=sampler)
+        return DataLoader(
+            dataset=self,
+            batch_size=batch_size,
+            shuffle=(sampler is None),  # Sampler itself will handle shuffling if provided
+            sampler=sampler,
+            num_workers=self.workers,       # Number of subprocesses to use for data loading
+            pin_memory=True,                # pre-allocate batches in page-locked memory so that GPU transfers are faster and can be asynchronous
+            drop_last=True,                 # drop the last incomplete(does not have the size 'batch_size') batch
+        )
 
     def __getitem__(self, index) -> dict:
         text = self.texts[index]
-        
-        input_tensor, output_tensor = self.get_io_tensors(text)
-        return {
-            # (SEQ_LEN,)
-            "decoder_input": input_tensor,
-            
-            # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
-            "decoder_mask": (input_tensor != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
-            
-            # (SEQ_LEN,)
-            "label": output_tensor
-        }
+        return self.get_io_tensors(text)
     
 
 class StreamingTextDataset(IterableDataset, IDataset):
-    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int) -> None:
-        super().__init__(file_path, tokenizer, max_len)
-    
-    @staticmethod
-    def collate_fn(batch):
-        return {
-            "decoder_input": torch.stack([item["decoder_input"] for item in batch]),
-            "decoder_mask": torch.stack([item["decoder_mask"] for item in batch]),
-            "label": torch.stack([item["label"] for item in batch])
-        }
+    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int, workers: int = 0) -> None:
+        super().__init__(file_path, tokenizer, max_len, workers)
+        self.epoch = 0
+        
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
         
     def get_loader(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
         return DataLoader(
-            self,
+            dataset=self,
             batch_size=batch_size,
-            collate_fn=self.collate_fn,
-            num_workers=LOCAL_WORLD_SIZE,
-            pin_memory=True
+            num_workers=self.workers,       # Number of subprocesses to use for data loading
+            pin_memory=True,                # pre-allocate batches in page-locked memory so that GPU transfers are faster and can be asynchronous
+            drop_last=True,                 # drop the last incomplete(does not have the size 'batch_size') batch
         )
 
     def __iter__(self) -> Iterator[dict]:
@@ -141,36 +124,14 @@ class StreamingTextDataset(IterableDataset, IDataset):
         with open(self.file_path, 'r', encoding='utf-8') as f:
             for i, line in enumerate(f):
                 # Shard the stream
-                if i % effective_world_size != effective_rank:
+                offset = (self.epoch * 9973) % effective_world_size     #  Add an epoch offset so shards reshuffle each epoch
+                if (i + offset) % effective_world_size != effective_rank:
                     continue
                 
                 # Parse each line as a separate JSON object
                 text = json.loads(line.strip())
-                
-                input_tensor, output_tensor = self.get_io_tensors(text)
-                yield {
-                    # (SEQ_LEN,)
-                    "decoder_input": input_tensor,
-                    
-                    # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
-                    "decoder_mask": (input_tensor != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
-                    
-                    # (SEQ_LEN,)
-                    "label": output_tensor
-                }
-
-
-class Conversation:
-    def __init__(self, type: str, system_text=None) -> None:
-        self.type = type
-        self.exchanges = []
-        self.system_text = system_text
-    
-    def add_exchange(self, input_text: str, output_text: str):
-        self.exchanges.append({
-            "input": input_text,
-            "output": output_text
-        })
+                             
+                yield self.get_io_tensors(text)
 
 
 class FineTuningDataset(IDataset):
@@ -221,21 +182,18 @@ class FineTuningDataset(IDataset):
         return len(self.samples)
     
     def get_loader(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
-        return DataLoader(self, batch_size, shuffle=(sampler is None), sampler=sampler)
+        return DataLoader(
+            dataset=self,
+            batch_size=batch_size,
+            shuffle=(sampler is None),
+            sampler=sampler,
+            num_workers=self.workers,       # Number of subprocesses to use for data loading
+            pin_memory=True,                # pre-allocate batches in page-locked memory so that GPU transfers are faster and can be asynchronous
+            drop_last=True,                 # drop the last incomplete(does not have the size 'batch_size') batch
+        )
 
     def __getitem__(self, index) -> dict:
-        input_tensor, output_tensor = self.samples[index]
-        
-        return {
-            # (SEQ_LEN,)
-            "decoder_input": input_tensor,
-                        
-            # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
-            "decoder_mask": (input_tensor != self.pad_token).unsqueeze(0) & self.lookback_mask(self.max_len),
-            
-            # (SEQ_LEN,)
-            "label": output_tensor
-        }
+        return self.samples[index]
     
     def get_io_tensors(self, conv: Conversation) -> tuple[torch.Tensor, torch.Tensor]:
         # System:              K L M N O
@@ -311,8 +269,8 @@ class FineTuningDataset(IDataset):
 class MultiTaskDataset(Dataset):
     ignore_index = IDataset.ignore_index
     
-    def __init__(self, datasets: dict[str, IDataset]) -> None:
-        self.tokenizer = datasets[list(datasets.keys())[0]].tokenizer
+    def __init__(self, datasets: dict[str, IDataset], workers: int = 0) -> None:
+        self.workers = workers
         self.task_names = list(datasets.keys())
         self.datasets = [datasets[k] for k in self.task_names]
         self.lengths = [len(ds) for ds in self.datasets]
@@ -326,8 +284,16 @@ class MultiTaskDataset(Dataset):
     def __len__(self):
         return self.total_len
     
-    def get_loader(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
-        return DataLoader(self, batch_size, shuffle=(sampler is None), sampler=sampler)
+    def get_loader(self, batch_size: int, sampler: "TemperatureMixSampler"=None) -> DataLoader:
+        return DataLoader(
+            dataset=self,
+            batch_size=batch_size,
+            shuffle=(sampler is None),
+            sampler=sampler,
+            num_workers=self.workers,       # Number of subprocesses to use for data loading
+            pin_memory=True,                # pre-allocate batches in page-locked memory so that GPU transfers are faster and can be asynchronous
+            drop_last=True,                 # drop the last incomplete(does not have the size 'batch_size') batch
+        )
 
     def __getitem__(self, global_index: int):
         task_id = bisect_left(self.offsets, global_index)
@@ -361,20 +327,17 @@ class TemperatureMixSampler(Sampler[int]):
             yield global_index
 
 
-class RollingShardsDataset:  
-    def __init__(self, datasets: dict[str, Dataset], num_shards: int):
-        assert num_shards >= 1
+class IShardedDataset(ABC):
+    def __init__(self, shards: int, workers: int = 0):
+        assert shards >= 1
         self._round = 0
-        self.num_shards = num_shards
-        self.names = list(datasets.keys())
-        self.datasets = [datasets[n] for n in self.names]
-
-        self._splits = []
-        for ds in self.datasets:
-            self._splits.append(
-                self._even_splits(len(ds), num_shards)
-            )
-
+        self.shards = shards
+        self.workers = workers
+    
+    @abstractmethod
+    def _dataset_for(self, shard_idx: int) -> Dataset:
+        raise NotImplementedError
+    
     @staticmethod
     def _even_splits(n: int, k: int):
         base, rem = divmod(n, k)
@@ -384,29 +347,60 @@ class RollingShardsDataset:
             splits.append((start, end))
             start = end
         return splits
+    
+    def get_loader(self, batch_size: int, shard_idx: int = 0) -> DataLoader:
+        ds = self._dataset_for(shard_idx)
+        return DataLoader(
+            dataset=ds,
+            batch_size=batch_size,
+            sampler=SequentialSampler(ds),
+            shuffle=False,
+            num_workers=self.workers,       # Number of subprocesses to use for data loading
+            pin_memory=True,                # pre-allocate batches in page-locked memory so that GPU transfers are faster and can be asynchronous
+        )
+    
+    def next_loader(self, batch_size: int) -> DataLoader:
+        shard_idx = self._round % self.shards
+        self._round += 1
+        return self.get_loader(batch_size, shard_idx=shard_idx)
+
+
+class ShardedDataset(IShardedDataset):  
+    def __init__(self, shards: int, dataset: Dataset, workers: int = 0):
+        super().__init__(shards, workers)
+        self.dataset = dataset
+        self._splits = self._even_splits(len(self.dataset), shards)
 
     def _dataset_for(self, shard_idx: int) -> Dataset:
-        k = shard_idx % self.num_shards
+        k = shard_idx % self.shards
+        s, e = self._splits[k]
+        if e > s:
+            idx = [i for i in range(s, e)]
+            return Subset(self.dataset, idx)
+        raise IndexError("Shard index out of range. Dataset is empty")
+
+
+class ShardedMultiTaskDataset(IShardedDataset):  
+    def __init__(self, shards: int, datasets: dict[str, Dataset], workers: int = 0):
+        super().__init__(shards, workers)
+        
+        self.names = list(datasets.keys())
+        self.datasets = [datasets[n] for n in self.names]
+
+        self._splits = []
+        for ds in self.datasets:
+            self._splits.append(
+                ShardedDataset._even_splits(len(ds), shards)
+            )
+
+    def _dataset_for(self, shard_idx: int) -> Dataset:
+        k = shard_idx % self.shards
         parts = []
         for ds, splits in zip(self.datasets, self._splits):
             s, e = splits[k]
             if e > s:
                 idx = [i for i in range(s, e)]
                 parts.append(Subset(ds, idx))
-        return ConcatDataset(parts) if parts else ConcatDataset([])
-
-    def get_loader(self, batch_size: int, sampler: Sampler=None, shard_idx: int = 0) -> DataLoader:
-        ds = self._dataset_for(shard_idx)
-        if sampler is None:
-            sampler = SequentialSampler(ds)
-        return DataLoader(
-            ds,
-            batch_size=batch_size,
-            sampler=sampler,
-            shuffle=False
-        )
-    
-    def next_loader(self, batch_size: int) -> DataLoader:
-        shard_idx = self._round % self.num_shards
-        self._round += 1
-        return self.get_loader(batch_size, shard_idx=shard_idx)
+        if not parts:
+            raise IndexError("Shard index out of range. Dataset is empty")
+        return ConcatDataset(parts)
