@@ -1,13 +1,10 @@
 import os
 import sys
-import time
 import torch
 import numpy
 import random
 import logging
-import tempfile
 import subprocess
-from typing import List
 
 random.seed(4321)
 torch.manual_seed(4321)
@@ -127,6 +124,8 @@ class TrainingConfig(Config):
         self.batch_size: int = kwargs.get("batch_size", 64)
         self.grad_accum_steps: int = kwargs.get("grad_accum_steps", 1)
         self.init_lr: float = kwargs.get("init_lr", 2e-04)
+        self.min_lr: float = kwargs.get("min_lr", 8e-05)
+        self.lr_scheduler: str = kwargs.get("lr_scheduler", "warmup_linear")
         self.weight_decay: float = kwargs.get("weight_decay", 0.01)
         self.beta1: float = kwargs.get("beta1", 0.9)
         self.beta2: float = kwargs.get("beta2", 0.999)

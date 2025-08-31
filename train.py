@@ -14,6 +14,7 @@ from torch.nn.parallel import DistributedDataParallel
 from config import *
 from model import GPTmodel
 from tensorboard_logger import TensorboardLogger
+from lr_schedulers import LRScheduler, get_lr_scheduler
 from dataset import ShardedDataset, TextStreamDataset, TextDataset, NLPDataset
 from utils import EarlyStopping, get_lookback_mask, log_confidence_metrics, save_checkpoint, validate
 
@@ -27,22 +28,6 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: NLPDataset, va
 
     if is_distributed:
         model = DistributedDataParallel(model, device_ids=[LOCAL_RANK])
-
-    # Learning rate scheduler with linear warmup for first warmup_steps
-    # followed by inverse square root decay(scaled by the model's dimensionality)
-    def lr_lambda(current_step: int):
-        # Avoid division by zero
-        current_step = max(1, current_step)
-        
-        # Scale factor
-        scale = model.config.embed_dim ** -0.5
-        
-        # Linear warmup for first warmup_steps, then inverse square root decay
-        lr = scale * min(
-            current_step ** -0.5,
-            current_step * (config.warmup_steps ** -1.5)
-        )
-        return lr / config.init_lr
     
     scaler = torch.GradScaler(device=DEVICE.type) if MIXED_PRECISION_ENABLED else None
 
@@ -55,7 +40,8 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: NLPDataset, va
         betas=(config.beta1, config.beta2),
         eps=config.epsilon
     )
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+    
+    scheduler = get_lr_scheduler(optimizer, config, model.config.embed_dim)
     
     accum_loss = 0
     global_step = 0
@@ -216,6 +202,8 @@ if __name__ == "__main__":
     parser.add_argument("--save-every", type=int, help="Number of weight updates between checkpoints")
     parser.add_argument("--validate-every", type=int, help="Number of weight updates between validations")
     parser.add_argument("--init-lr", type=float, help="Initial learning rate")
+    parser.add_argument("--min-lr", type=float, help="Minimum learning rate")
+    parser.add_argument("--lr-scheduler", type=str, choices=[LRScheduler.WARMUP_CONSTANT.value, LRScheduler.WARMUP_LINEAR.value, LRScheduler.WARMUP_COSINE.value, LRScheduler.INVERSE_SQRT.value], help="Learning rate scheduler(default: warmup_linear)")
     parser.add_argument("--weight-decay", type=float, help="L2 regularization coefficient")
     parser.add_argument("--beta1", type=float, help="Adam optimizer beta1")
     parser.add_argument("--beta2", type=float, help="Adam optimizer beta2")
