@@ -11,11 +11,11 @@ from datetime import datetime
 from config import *
 from model import GPTmodel
 from tensorboard_logger import TensorboardLogger
-from dataset import MultiTaskDataset, ShardedMultiTaskDataset,TemperatureMixSampler, FineTuningDataset, IDataset
+from dataset import MultiTaskDataset, ShardedMultiTaskDataset,TemperatureSampler, FineTuningDataset, NLPDataset
 from utils import EarlyStopping, get_lookback_mask, log_confidence_metrics, save_checkpoint, set_trainable_params, validate
 
 
-def finetune(config: TrainingConfig, model: GPTmodel, finetune_dataset: IDataset, val_dataset: ShardedMultiTaskDataset, training_state: TrainingState | None = None) -> None:
+def finetune(config: TrainingConfig, model: GPTmodel, finetune_dataset: NLPDataset, val_dataset: ShardedMultiTaskDataset, training_state: TrainingState | None = None) -> None:
     tb_logger = TensorboardLogger(config.tb_log_dir)
     
     tb_logger.log_text("TrainingConfig", f"```json\n{json.dumps(config.__dict__, indent=2)}\n```", step=0)
@@ -67,7 +67,7 @@ def finetune(config: TrainingConfig, model: GPTmodel, finetune_dataset: IDataset
 
     loss_func = nn.CrossEntropyLoss(ignore_index=finetune_dataset.ignore_index, label_smoothing=config.label_smoothing).to(DEVICE)
         
-    train_sampler = TemperatureMixSampler(
+    train_sampler = TemperatureSampler(
         finetune_dataset,
         alpha=training_config.sampler_alpha,
         steps_per_epoch=config.batch_size * config.samples_per_epoch,

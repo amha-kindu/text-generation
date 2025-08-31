@@ -117,56 +117,6 @@ class ModelWithLoRAConfig(ModelConfig):
         self.lora_dropout: float = kwargs.get("lora_dropout", 0.05)
 
 
-def get_line_count(file_path):
-    cache_file_path = f"{file_path}.lc"
-    lock_path = cache_file_path + ".lock"
-    
-    while True:
-        if os.path.exists(cache_file_path):
-            if GLOBAL_RANK == COORDINATOR_RANK:
-                LOGGER.info("Using cached sample count")
-            with open(cache_file_path, 'r') as f:
-                val = f.read().strip()
-                if val:
-                    return int(val)
-            # If empty, continue to compute
-        
-        # Try to acquire lock to compute
-        try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            try:
-                # Check again after acquiring lock
-                if os.path.exists(cache_file_path):
-                    with open(cache_file_path, 'r') as f:
-                        val = f.read().strip()
-                        if val:
-                            return int(val)
-                
-                # Compute line count
-                if GLOBAL_RANK == COORDINATOR_RANK:
-                    LOGGER.info("Counting samples in training data...")
-                with open(file_path, 'r') as src_file:
-                    count = sum(1 for _ in src_file)
-                
-                # Write to temp file and rename atomically
-                dir_name = os.path.dirname(cache_file_path)
-                temp_fd, temp_path = tempfile.mkstemp(prefix='cache.', suffix='.tmp', dir=dir_name)
-                try:
-                    with os.fdopen(temp_fd, 'w') as temp_f:
-                        temp_f.write(str(count))
-                    os.rename(temp_path, cache_file_path)
-                except:
-                    os.unlink(temp_path)
-                    raise
-                
-                return count
-            finally:
-                os.close(fd)
-                os.unlink(lock_path)
-        except FileExistsError:
-            time.sleep(0.1)
-
-
 class TrainingConfig(Config):
     def __init__(self, **kwargs):
         kwargs = { k: v for k, v in kwargs.items() if v is not None}

@@ -1,21 +1,24 @@
+import os
 import json
 import torch
+import struct
 import random
-from typing import Iterator
+import numpy as np
 import sentencepiece as spm
 from bisect import bisect_left
 from abc import ABC, abstractmethod
-from torch.utils.data import get_worker_info, Dataset, Subset, IterableDataset, DataLoader, Sampler, ConcatDataset, SequentialSampler
+from torch.utils.data import Dataset, Subset, DataLoader, Sampler, ConcatDataset, SequentialSampler
 
 from config import *
 from utils import Conversation
 from preprocessor import AmharicPreprocessor
 
 
-class IDataset(Dataset, ABC):
+class NLPDataset(Dataset):
     ignore_index = -100
     
     def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int, workers: int = 0) -> None:
+        self.tokens = 0
         self.workers = workers
         self.max_len = max_len
         self.file_path = file_path
@@ -24,9 +27,16 @@ class IDataset(Dataset, ABC):
 
         self.pad_token = self.tokenizer.pad_id()
 
-    @abstractmethod
     def get_loader(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
-        raise NotImplementedError("Subclass must implement the 'get_loader' abstractmethod!")
+        return DataLoader(
+            dataset=self,
+            batch_size=batch_size,
+            shuffle=(sampler is None),      # Sampler itself will handle shuffling if provided
+            sampler=sampler,
+            num_workers=self.workers,       # Number of subprocesses to use for data loading
+            pin_memory=True,                # pre-allocate batches in page-locked memory so that GPU transfers are faster and can be asynchronous
+            drop_last=True,                 # drop the last incomplete(does not have the size 'batch_size') batch
+        )
     
     def get_io_tensors(self, text: str) -> tuple[torch.Tensor, torch.Tensor]:
         # Text:               A B C D E
@@ -58,83 +68,84 @@ class IDataset(Dataset, ABC):
         return input, output
 
 
-class TextDataset(IDataset):
+class TextDataset(NLPDataset):
     def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int, workers: int = 0) -> None:
         super().__init__(file_path, tokenizer, max_len, workers)
 
-        self.texts = []
-        self.file = open(file_path, 'r', encoding='utf-8')
         file_name = os.path.basename(file_path)
+        self.samples: list[tuple[torch.Tensor, torch.Tensor]] = []
+        assert '.jsonl' in file_name, f"Only JSONL files are supported for raw text datasets!"
         with open(file_path, 'r', encoding='utf-8') as f:
             LOGGER.info(f"\033[93mLoading data from {file_name}...\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
             for line in f:
-                # Parse each line as a separate JSON object
                 text = json.loads(line.strip())
                 preprocessed_text = self.preprocessor.execute(text)
                 if preprocessed_text:
-                    self.texts.append(preprocessed_text)
-                    if self.texts and len(self.texts) % 100000 == 0:
+                    self.samples.append(self.get_io_tensors(preprocessed_text))
+                    if self.samples and len(self.samples) % 100000 == 0:
                         LOGGER.info(f"\033[93mLoaded {len(self.texts)} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
         LOGGER.info(f"\033[92mDone! Loaded {len(self.texts)} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
 
     def __len__(self) -> int:
-        return len(self.texts)
-
-    def get_loader(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
-        return DataLoader(
-            dataset=self,
-            batch_size=batch_size,
-            shuffle=(sampler is None),  # Sampler itself will handle shuffling if provided
-            sampler=sampler,
-            num_workers=self.workers,       # Number of subprocesses to use for data loading
-            pin_memory=True,                # pre-allocate batches in page-locked memory so that GPU transfers are faster and can be asynchronous
-            drop_last=True,                 # drop the last incomplete(does not have the size 'batch_size') batch
-        )
+        return len(self.samples)
 
     def __getitem__(self, index) -> dict:
-        text = self.texts[index]
-        return self.get_io_tensors(text)
+        return self.samples[index]
     
 
-class StreamingTextDataset(IterableDataset, IDataset):
-    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int, workers: int = 0) -> None:
+class TextStreamDataset(NLPDataset):
+    def __init__(self, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int, workers: int = 0):
         super().__init__(file_path, tokenizer, max_len, workers)
-        self.epoch = 0
         
-    def set_epoch(self, epoch: int):
-        self.epoch = epoch
+        meta_data = {}
+        index_path = file_path + '.index'
+        meta_path = file_path + '.meta.json'
+        file_name = os.path.basename(file_path)
+        if os.path.exists(meta_path):
+            with open(meta_path, 'r') as f:
+                meta_data = json.load(f)
+            self.tokens = meta_data['tokens']
         
-    def get_loader(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
-        return DataLoader(
-            dataset=self,
-            batch_size=batch_size,
-            num_workers=self.workers,       # Number of subprocesses to use for data loading
-            pin_memory=True,                # pre-allocate batches in page-locked memory so that GPU transfers are faster and can be asynchronous
-            drop_last=True,                 # drop the last incomplete(does not have the size 'batch_size') batch
+        if meta_data.get('mtime', None) != os.path.getmtime(file_path):
+            assert '.jsonl' in file_name, f"Only JSONL files are supported for raw text datasets!"
+            with open(file_path, 'rb', buffering=1024 * 1024) as fin, open(index_path, 'wb') as fout:
+                LOGGER.info(f"\033[93mRegistering offsets from {file_name}...\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+                count = 0
+                while True:
+                    pos = fin.tell()
+                    line = fin.readline()
+                    if not line:    break
+                    
+                    preprocessed_line = self.preprocessor.execute(json.loads(line.strip()))
+                    self.tokens += len(self.tokenizer.Encode(preprocessed_line, out_type=int))
+                    
+                    fout.write(struct.pack('<Q', pos))
+                    count += 1
+                    if count % 1_000_000 == 0:
+                        LOGGER.info(f"\033[93mRegistered {count} offsets from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+                    
+                with open(meta_path, 'w') as f:
+                    json.dump({ "mtime": os.path.getmtime(file_path), "tokens": self.tokens }, f, indent=2)
+            
+        # Read-only memmap of uint64 offsets of each sample
+        self.offsets = np.memmap(index_path, dtype=np.uint64, mode='r')
+        LOGGER.info(f"\033[92mDone! Registered {len(self.offsets)} offsets from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+        
+    def __len__(self) -> int:
+        return len(self.offsets)
+        
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        offset = int(self.offsets[index])
+        with open(self.file_path, 'rb', buffering=1024 * 1024) as f:
+            f.seek(offset)
+            line = f.readline()       
+        
+        return self.get_io_tensors(
+            text=json.loads(line.strip())
         )
 
-    def __iter__(self) -> Iterator[dict]:
-        worker_info = get_worker_info()
-        worker_id = worker_info.id if worker_info else 0
-        num_workers = worker_info.num_workers if worker_info else 1
 
-        effective_rank = GLOBAL_RANK * num_workers + worker_id
-        effective_world_size = WORLD_SIZE * num_workers
-        
-        with open(self.file_path, 'r', encoding='utf-8') as f:
-            for i, line in enumerate(f):
-                # Shard the stream
-                offset = (self.epoch * 9973) % effective_world_size     #  Add an epoch offset so shards reshuffle each epoch
-                if (i + offset) % effective_world_size != effective_rank:
-                    continue
-                
-                # Parse each line as a separate JSON object
-                text = json.loads(line.strip())
-                             
-                yield self.get_io_tensors(text)
-
-
-class FineTuningDataset(IDataset):
+class FineTuningDataset(NLPDataset):
     def __init__(self, intent: str, file_path: str, tokenizer: spm.SentencePieceProcessor, max_len: int) -> None:
         super().__init__(file_path, tokenizer, max_len)
         self.bot_token = self.tokenizer.PieceToId("[BOT]")
@@ -180,17 +191,6 @@ class FineTuningDataset(IDataset):
     
     def __len__(self) -> int:
         return len(self.samples)
-    
-    def get_loader(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
-        return DataLoader(
-            dataset=self,
-            batch_size=batch_size,
-            shuffle=(sampler is None),
-            sampler=sampler,
-            num_workers=self.workers,       # Number of subprocesses to use for data loading
-            pin_memory=True,                # pre-allocate batches in page-locked memory so that GPU transfers are faster and can be asynchronous
-            drop_last=True,                 # drop the last incomplete(does not have the size 'batch_size') batch
-        )
 
     def __getitem__(self, index) -> dict:
         return self.samples[index]
@@ -267,9 +267,9 @@ class FineTuningDataset(IDataset):
 
 
 class MultiTaskDataset(Dataset):
-    ignore_index = IDataset.ignore_index
+    ignore_index = NLPDataset.ignore_index
     
-    def __init__(self, datasets: dict[str, IDataset], workers: int = 0) -> None:
+    def __init__(self, datasets: dict[str, NLPDataset], workers: int = 0) -> None:
         self.workers = workers
         self.task_names = list(datasets.keys())
         self.datasets = [datasets[k] for k in self.task_names]
@@ -284,17 +284,6 @@ class MultiTaskDataset(Dataset):
     def __len__(self):
         return self.total_len
     
-    def get_loader(self, batch_size: int, sampler: "TemperatureMixSampler"=None) -> DataLoader:
-        return DataLoader(
-            dataset=self,
-            batch_size=batch_size,
-            shuffle=(sampler is None),
-            sampler=sampler,
-            num_workers=self.workers,       # Number of subprocesses to use for data loading
-            pin_memory=True,                # pre-allocate batches in page-locked memory so that GPU transfers are faster and can be asynchronous
-            drop_last=True,                 # drop the last incomplete(does not have the size 'batch_size') batch
-        )
-
     def __getitem__(self, global_index: int):
         task_id = bisect_left(self.offsets, global_index)
         if task_id == len(self.offsets) or global_index != self.offsets[task_id]:
@@ -302,7 +291,7 @@ class MultiTaskDataset(Dataset):
         return self.datasets[task_id][global_index - self.offsets[task_id]]
 
 
-class TemperatureMixSampler(Sampler[int]):
+class TemperatureSampler(Sampler[int]):
     def __init__(self, mt_dataset: MultiTaskDataset, alpha: float = 0.5,
                  steps_per_epoch: int | None = None):
         self.alpha = alpha

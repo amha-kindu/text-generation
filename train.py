@@ -14,11 +14,11 @@ from torch.nn.parallel import DistributedDataParallel
 from config import *
 from model import GPTmodel
 from tensorboard_logger import TensorboardLogger
-from dataset import ShardedDataset, StreamingTextDataset, TextDataset, IDataset
+from dataset import ShardedDataset, TextStreamDataset, TextDataset, NLPDataset
 from utils import EarlyStopping, get_lookback_mask, log_confidence_metrics, save_checkpoint, validate
 
 
-def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_dataset: ShardedDataset, is_distributed: bool = False, training_state: TrainingState | None = None) -> None:
+def train(config: TrainingConfig, model: GPTmodel, train_dataset: NLPDataset, val_dataset: ShardedDataset, is_distributed: bool = False, training_state: TrainingState | None = None) -> None:
     tb_logger = TensorboardLogger(config.tb_log_dir)
     
     tb_logger.log_text("TrainingConfig", f"```json\n{json.dumps(config.__dict__, indent=2)}\n```", step=0)
@@ -83,9 +83,6 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: IDataset, val_
             
             if is_distributed:
                 train_sampler.set_epoch(epoch)
-            
-            if isinstance(train_dataset, StreamingTextDataset):
-                train_dataset.set_epoch(epoch)
             
             # (N_BATCHES, SEQ_LEN)
             decoder_input: torch.Tensor = batch[0].to(DEVICE)
@@ -288,13 +285,11 @@ if __name__ == "__main__":
     if os.path.getsize(training_config.training_data) > 200 * 1024 * 1024:
         if GLOBAL_RANK == COORDINATOR_RANK:
             LOGGER.info(f"File '{os.path.basename(training_config.training_data)}' too large! streaming file...")
-        train_dataset = StreamingTextDataset(training_config.training_data, tokenizer, model_config.seq_len, training_config.workers)
-        samples = get_line_count(training_config.training_data)
+        train_dataset = TextStreamDataset(training_config.training_data, tokenizer, model_config.seq_len, training_config.workers)
     else:
         train_dataset = TextDataset(training_config.training_data, tokenizer, model_config.seq_len, training_config.workers)
-        samples = len(train_dataset)
     
-    training_config.samples_per_epoch = math.floor(samples / (training_config.batch_size * WORLD_SIZE))
+    training_config.samples_per_epoch = math.floor(len(train_dataset) / (training_config.batch_size * WORLD_SIZE))
     training_config.updates_per_epoch = math.floor(training_config.samples_per_epoch / training_config.grad_accum_steps)
     
     shards = training_config.updates_per_epoch // training_config.validate_every
@@ -308,7 +303,10 @@ if __name__ == "__main__":
     
     if GLOBAL_RANK == COORDINATOR_RANK:
         numerical_configs = {k: v for k, v in training_config.to_dict().items() if not isinstance(v, str)}
-        LOGGER.info(f"Total training samples: {samples}")
+        LOGGER.info(f"Total training samples: {len(train_dataset)}")
+        if train_dataset.tokens > 0:
+            LOGGER.info(f"Total training tokens: {train_dataset.tokens}")
+            LOGGER.info(f"Average tokens per sample: {train_dataset.tokens / len(train_dataset)}")
         LOGGER.info(f"Using training config: {numerical_configs}")
         LOGGER.info(f"Initiating training with {'mixed-precision' if MIXED_PRECISION_ENABLED else 'single-precision'}...")
         LOGGER.info(f"Using model config: {model_config}")
