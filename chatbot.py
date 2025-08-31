@@ -96,7 +96,7 @@ if __name__ == '__main__':
     LOGGER.info(f"Loading checkpoint from {args.checkpoint}...")
     checkpoint: dict = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
 
-    model_config: ModelConfig = ModelConfig(**checkpoint["model_config"])
+    model_config: ModelConfig = checkpoint["model_config"]
     
     inference_config: InferenceConfig = DEFAULT_INFERENCE_CONFIG
     inference_config.update(**args.__dict__)
@@ -121,9 +121,13 @@ if __name__ == '__main__':
     
     model.eval()
     if args.lora_checkpoint:
+        merged = False
         for module in model.modules():
             if isinstance(module, LoRAdapter):
                 module.merge()
+                merged = True
+        if merged:
+            LOGGER.info(f"Merged LoRA adapters in model...")
 
     total_params = sum(p.numel() for p in model.parameters())
     LOGGER.info(f"Device: {DEVICE}")

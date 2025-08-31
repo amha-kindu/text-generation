@@ -232,61 +232,19 @@ class GPTmodel(nn.Module):
         x = self._decode(x, mask, use_cache, kv_caches)
         return self._project(x)
     
-    def apply_lora(self, targets: dict, rank: int, alpha: float, dropout: float):
-        def _update_linear_layer(submodule: nn.Module, layer_name: str):
-            linear_layer = submodule.get_submodule(layer_name)
-            if not isinstance(linear_layer, nn.Linear):
-                raise ValueError(f"{layer_name} must be nn.Linear")
-            adapter = LoRAdapter(
-                linear_layer,
-                rank=rank,
-                alpha=alpha,
-                dropout=dropout
-            )            
-            setattr(submodule, layer_name, adapter)
-        
-        for submodule_name, data in targets.items():
-            if data["type"] == 'ModuleList':
-                for idx  in data['indices']:
-                    for target in data['submodules']:
-                        temp = target.split(".")
-                        if len(temp) > 1:
-                            layer_name, layer_parent = temp[-1], ".".join(temp[:-1])
-                            submodule = self.get_submodule(f"{submodule_name}.{idx}.{layer_parent}")
-                        else:
-                            layer_name = temp[0]
-                            submodule = self.get_submodule(f"{submodule_name}.{idx}")
-                        _update_linear_layer(submodule, layer_name)
-            elif data["type"] == 'Module':
-                for target in data['submodules']:
-                    temp = target.split(".")
-                    if len(temp) > 1:
-                        layer_name, layer_parent = temp[-1], ".".join(temp[:-1])
-                        submodule = self.get_submodule(f"{submodule_name}.{layer_parent}")
-                    else:
-                        layer_name = temp[0]
-                        submodule = self.get_submodule(f"{submodule_name}")                    
-                    _update_linear_layer(submodule, layer_name)
-            else:
-                raise ValueError(f"Unknown type: {data['type']}")
-    
+
     @staticmethod
     def build(
         config: ModelConfig | ModelWithLoRAConfig,
         weights: dict = {}
     ):
         model = GPTmodel(config)
-        
-        if isinstance(config, ModelWithLoRAConfig):
-            model.apply_lora(
-                targets=config.lora_targets,
-                rank=config.lora_rank,
-                alpha=config.lora_alpha,
-                dropout=config.lora_dropout
-            )
+                
+        lora_weights = {k: v for k, v in weights.items() if k in LoRAdapter.get_lora_param_names(config.lora_targets)}
+        base_weights = {k: v for k, v in weights.items() if k not in lora_weights}
 
         if weights:
-            model.load_state_dict(weights, strict=not isinstance(config, ModelWithLoRAConfig))
+            model.load_state_dict(base_weights, strict=True)
         else:
             def init_weights(m):
                 if isinstance(m, nn.Linear):
@@ -300,5 +258,11 @@ class GPTmodel(nn.Module):
                     nn.init.zeros_(m.bias)
             
             model.apply(init_weights)
+            
+        if isinstance(config, ModelWithLoRAConfig):
+            LoRAdapter.apply_lora(model, config.lora_targets, config.lora_rank, config.lora_alpha, config.lora_dropout)
+            
+            if lora_weights:
+                model.load_state_dict(lora_weights, strict=False)
 
         return model

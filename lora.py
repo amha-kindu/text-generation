@@ -55,3 +55,40 @@ class LoRAdapter(nn.Module):
         r = F.linear(r, self.up.t(), bias=None)
         
         return self.base(x) + self.scaling * r
+    
+    @staticmethod
+    def get_lora_param_names( targets: dict):
+        new_params = []        
+        for submodule_name, data in targets.items():
+            if data["type"] == 'ModuleList':
+                for idx  in data['indices']:
+                    for target in data['submodules']:
+                        new_params.append(f"{submodule_name}.{idx}.{target}.up")
+                        new_params.append(f"{submodule_name}.{idx}.{target}.down")
+            elif data["type"] == 'Module':
+                for target in data['submodules']:
+                    new_params.append(f"{submodule_name}.{target}.up")
+                    new_params.append(f"{submodule_name}.{target}.down")
+            else:
+                raise ValueError(f"Unknown type: {data['type']}")
+        return new_params
+
+    @staticmethod
+    def apply_lora(model: nn.Module, targets: dict, rank: int, alpha: float, dropout: float):
+        params = set(tuple(p.split(".")[:-1]) for p in LoRAdapter.get_lora_param_names(targets))
+        for param in params:
+            layer_name, parent_module_name = param[-1], ".".join(param[:-1])
+            
+            module = model.get_submodule(parent_module_name)
+            linear_layer = getattr(module, layer_name)
+            
+            if not isinstance(linear_layer, nn.Linear):
+                raise ValueError(f"{layer_name} must be nn.Linear")
+            
+            adapter = LoRAdapter(
+                linear_layer,
+                rank=rank,
+                alpha=alpha,
+                dropout=dropout
+            )
+            setattr(module, layer_name, adapter)
