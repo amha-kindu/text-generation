@@ -16,7 +16,7 @@ from model import GPTmodel
 from tensorboard_logger import TensorboardLogger
 from lr_schedulers import LRScheduler, get_lr_scheduler
 from dataset import ShardedDataset, TextStreamDataset, TextDataset, NLPDataset
-from utils import EarlyStopping, get_lookback_mask, log_confidence_metrics, save_checkpoint, validate
+from utils import EarlyStopping, get_casual_mask, log_confidence_metrics, save_checkpoint, validate
 
 
 def train(config: TrainingConfig, model: GPTmodel, train_dataset: NLPDataset, val_dataset: ShardedDataset, is_distributed: bool = False, training_state: TrainingState | None = None) -> None:
@@ -73,9 +73,9 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: NLPDataset, va
             # (N_BATCHES, SEQ_LEN)
             decoder_input: torch.Tensor = batch[0].to(DEVICE)
             label: torch.Tensor         = batch[1].to(DEVICE)
-
-            # (SEQ_LEN, SEQ_LEN)
-            decoder_mask: torch.Tensor = get_lookback_mask(decoder_input.shape[1]).to(DEVICE)
+            
+            # (N_BATCHES, SEQ_LEN, SEQ_LEN)
+            decoder_mask: torch.Tensor  = batch[2].to(DEVICE)
 
             with torch.autocast(device_type=DEVICE.type, enabled=MIXED_PRECISION_ENABLED):
                 # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
@@ -226,6 +226,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume", default=False, action="store_true", help="Resume training from checkpoint")
     parser.add_argument("--max-checkpoints-to-keep", type=int, help="Maximum number of checkpoints to keep")
     parser.add_argument("--dl-workers", type=int, help="Number of subprocesses to use for data loading")
+    parser.add_argument("--stream", default=False, action="store_true", help="Stream data from disk")
 
     args = parser.parse_args()
     
@@ -270,12 +271,19 @@ if __name__ == "__main__":
     tokenizer = spm.SentencePieceProcessor()
     tokenizer.LoadFromFile(args.tokenizer)
     
-    if os.path.getsize(training_config.training_data) > 200 * 1024 * 1024:
+    if args.stream or os.path.getsize(training_config.training_data) > 200 * 1024 * 1024:
         if GLOBAL_RANK == COORDINATOR_RANK:
             LOGGER.info(f"File '{os.path.basename(training_config.training_data)}' too large! streaming file...")
         train_dataset = TextStreamDataset(training_config.training_data, tokenizer, model_config.seq_len, training_config.workers)
     else:
         train_dataset = TextDataset(training_config.training_data, tokenizer, model_config.seq_len, training_config.workers)
+            
+    if args.stream or os.path.getsize(training_config.validation_data) > 200 * 1024 * 1024:
+        if GLOBAL_RANK == COORDINATOR_RANK:
+            LOGGER.info(f"File '{os.path.basename(training_config.validation_data)}' too large! streaming file...")
+        val_dataset = TextStreamDataset(training_config.validation_data, tokenizer, model_config.seq_len)
+    else:
+        val_dataset = TextDataset(training_config.validation_data, tokenizer, model_config.seq_len)
     
     training_config.samples_per_epoch = math.floor(len(train_dataset) / (training_config.batch_size * WORLD_SIZE))
     training_config.updates_per_epoch = math.floor(training_config.samples_per_epoch / training_config.grad_accum_steps)
@@ -283,7 +291,7 @@ if __name__ == "__main__":
     shards = training_config.updates_per_epoch // training_config.validate_every
     val_dataset = ShardedDataset(
         shards=shards,
-        dataset=TextDataset(training_config.validation_data, tokenizer, model_config.seq_len),
+        dataset=val_dataset,
         workers=training_config.workers,
     )
     
@@ -294,7 +302,7 @@ if __name__ == "__main__":
         LOGGER.info(f"Total training samples: {len(train_dataset)}")
         if train_dataset.tokens > 0:
             LOGGER.info(f"Total training tokens: {train_dataset.tokens}")
-            LOGGER.info(f"Average tokens per sample: {train_dataset.tokens / len(train_dataset)}")
+            LOGGER.info(f"Average tokens per sample: {train_dataset.tokens / len(train_dataset):.2f}")
         LOGGER.info(f"Using training config: {numerical_configs}")
         LOGGER.info(f"Initiating training with {'mixed-precision' if MIXED_PRECISION_ENABLED else 'single-precision'}...")
         LOGGER.info(f"Using model config: {model_config}")

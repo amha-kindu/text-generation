@@ -119,7 +119,7 @@ class TrainingConfig(Config):
         kwargs = { k: v for k, v in kwargs.items() if v is not None}
         self.samples_per_epoch = None
         self.updates_per_epoch = None
-        self.workers: int = kwargs.get("dl-workers", 0)
+        self.workers: int = kwargs.get("dl_workers", 0)
         self.epochs: int = kwargs.get("epochs", 10)
         self.batch_size: int = kwargs.get("batch_size", 64)
         self.grad_accum_steps: int = kwargs.get("grad_accum_steps", 1)
@@ -144,9 +144,8 @@ class TrainingConfig(Config):
         self.training_data: str = kwargs.get("training_data", None)
         self.validation_data: str = kwargs.get("validation_data", None)
         self.finetuning: bool = kwargs.get("finetuning", False)
-        
-        if self.finetuning:
-            self.sampler_alpha: float = kwargs.get("sampler_alpha", 0.5)
+        self.sampler_alpha: float = kwargs.get("sampler_alpha", 0.5)
+        self.grad_scaler_init: float = kwargs.get("grad_scaler_init", 2 ** 14)
         
         if self.training_data and not os.path.isfile(self.training_data):
             raise FileNotFoundError(f"File '{self.training_data}' does not exist")

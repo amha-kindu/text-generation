@@ -15,7 +15,7 @@ from inference import GptInferenceEngine
 class ChatBot(GptInferenceEngine):
     def __init__(self, model: GPTmodel, tokenizer: spm.SentencePieceProcessor, system_prompt: str = "", config: InferenceConfig = DEFAULT_INFERENCE_CONFIG) -> None:
         super().__init__(model, tokenizer, config)
-        self.user_input = ""
+        self.user_input = []
         self.conv = Conversation(system_prompt)
         self.bot_token = self.tokenizer.PieceToId("[BOT]")
         self.user_token = self.tokenizer.PieceToId("[USER]")

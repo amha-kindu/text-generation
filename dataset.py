@@ -1,5 +1,6 @@
 import os
 import json
+import ijson
 import torch
 import struct
 import random
@@ -10,8 +11,8 @@ from abc import ABC, abstractmethod
 from torch.utils.data import Dataset, Subset, DataLoader, Sampler, ConcatDataset, SequentialSampler
 
 from config import *
-from utils import Conversation
 from preprocessor import AmharicPreprocessor
+from utils import Conversation, get_casual_and_prefix_mask, get_casual_mask
 
 
 class NLPDataset(Dataset):
@@ -83,14 +84,20 @@ class TextDataset(NLPDataset):
                 if preprocessed_text:
                     self.samples.append(self.get_io_tensors(preprocessed_text))
                     if self.samples and len(self.samples) % 100000 == 0:
-                        LOGGER.info(f"\033[93mLoaded {len(self.texts)} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
-        LOGGER.info(f"\033[92mDone! Loaded {len(self.texts)} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+                        LOGGER.info(f"\033[93mLoaded {len(self.samples)} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+        LOGGER.info(f"\033[92mDone! Loaded {len(self.samples)} samples from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, index) -> dict:
-        return self.samples[index]
+        input, output = self.samples[index]
+        
+        # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
+        mask = (input != self.pad_token).unsqueeze(0) & \
+            get_casual_mask(self.max_len)
+        
+        return input, output, mask
     
 
 class TextStreamDataset(NLPDataset):
@@ -125,12 +132,19 @@ class TextStreamDataset(NLPDataset):
                         LOGGER.info(f"\033[93mRegistered {count} offsets from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
                     
                 with open(meta_path, 'w') as f:
-                    json.dump({ "mtime": os.path.getmtime(file_path), "tokens": self.tokens }, f, indent=2)
+                    json.dump({ "mtime": os.path.getmtime(file_path), "tokens": self.tokens, "samples": count }, f, indent=2)
             
-        # Read-only memmap of uint64 offsets of each sample
-        self.offsets = np.memmap(index_path, dtype=np.uint64, mode='r')
-        LOGGER.info(f"\033[92mDone! Registered {len(self.offsets)} offsets from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+            LOGGER.info(f"\033[92mDone! Registered {count} offsets from {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
+        else:
+            LOGGER.info(f"\033[93mUsing existing index for {file_name}\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
         
+        # Read-only memmap of uint64 offsets of each sample        
+        self.offsets = np.memmap(index_path, dtype=np.uint64, mode='r')
+        if GLOBAL_RANK == COORDINATOR_RANK:
+            index_file = os.path.basename(index_path)
+            mib = self.offsets.nbytes / (1024 ** 2)
+            LOGGER.info(f"\033[92mEstablished read-only memory mapping with {index_file} ({mib:.2f} MiB) for {len(self.offsets)} offsets\033[0m")
+    
     def __len__(self) -> int:
         return len(self.offsets)
         
@@ -140,9 +154,15 @@ class TextStreamDataset(NLPDataset):
             f.seek(offset)
             line = f.readline()       
         
-        return self.get_io_tensors(
+        input, output = self.get_io_tensors(
             text=json.loads(line.strip())
         )
+        
+        # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
+        mask = (input != self.pad_token).unsqueeze(0) & \
+            get_casual_mask(self.max_len)
+        
+        return input, output, mask
 
 
 class FineTuningDataset(NLPDataset):
@@ -159,8 +179,7 @@ class FineTuningDataset(NLPDataset):
         file_name = os.path.basename(file_path)
         with open(file_path, 'r', encoding='utf-8') as f:
             LOGGER.info(f"\033[93mLoading data from {file_name}{'/' + intent if intent else ''}...\033[0m") if GLOBAL_RANK == COORDINATOR_RANK else None
-            data = json.load(f)
-            for sample in data:
+            for sample in ijson.items(f, 'item'):
                 if intent and sample['type'] != intent:
                     continue
                 system_prompt = sample.get("system", "")
@@ -177,8 +196,7 @@ class FineTuningDataset(NLPDataset):
                         LOGGER.error('File must be in JSON format [{"system": ..., "exchanges": [{"input": ..., "output": ...}, ...}]]')
                         exit(1)
                 try:
-                    input, output = self.get_io_tensors(conv)
-                    self.samples.append((input, output))
+                    self.samples.append(self.get_io_tensors(conv))
                 except ValueError:
                     skips += 1
                     continue
@@ -193,7 +211,24 @@ class FineTuningDataset(NLPDataset):
         return len(self.samples)
 
     def __getitem__(self, index) -> dict:
-        return self.samples[index]
+        input, output = self.samples[index]
+        
+        # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
+        mask = (input != self.pad_token).unsqueeze(0) & \
+            get_casual_and_prefix_mask(self.max_len, self.get_prefixes(input))
+            
+        return input, output, mask
+    
+    def get_prefixes(self, input: torch.Tensor) -> list[tuple[int, int]]:
+        start = None
+        prefix_boundaries = []
+        for i in range(len(input)):
+            if start is None and input[i] in [self.user_token, self.system_token]:
+                start = i
+            elif input[i] == self.bot_token and start is not None:
+                prefix_boundaries.append((start, i - 1))
+                start = None
+        return prefix_boundaries
     
     def get_io_tensors(self, conv: Conversation) -> tuple[torch.Tensor, torch.Tensor]:
         # System:              K L M N O
@@ -242,7 +277,7 @@ class FineTuningDataset(NLPDataset):
         
         input_ids.extend(exchanges_ipt)
         output_ids.extend(exchanges_opt)
-
+        
         padding = self.max_len - len(input_ids)
         
         # (SEQ_LEN,)
@@ -282,7 +317,18 @@ class MultiTaskDataset(Dataset):
         self.total_len = total
 
     def __len__(self):
-        return self.total_len
+        return self.total_len    
+    
+    def get_loader(self, batch_size: int, sampler: Sampler=None) -> DataLoader:
+        return DataLoader(
+            dataset=self,
+            batch_size=batch_size,
+            shuffle=(sampler is None),      # Sampler itself will handle shuffling if provided
+            sampler=sampler,
+            num_workers=self.workers,       # Number of subprocesses to use for data loading
+            pin_memory=True,                # pre-allocate batches in page-locked memory so that GPU transfers are faster and can be asynchronous
+            drop_last=True,                 # drop the last incomplete(does not have the size 'batch_size') batch
+        )
     
     def __getitem__(self, global_index: int):
         task_id = bisect_left(self.offsets, global_index)

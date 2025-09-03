@@ -36,18 +36,28 @@ class EarlyStopping:
             if self.counter >= self.patience:
                 return True
         return False
-    
-def get_lookback_mask(size: int) -> torch.Tensor:
+
+@torch.no_grad() 
+def get_casual_mask(size: int) -> torch.Tensor:
     # Lower triangular matrix
     # [[
-    #   [1, 0, ... , 0],
-    #   [1, 1, ... , 0],
-    #   [1, 1, ... , 0],
-    #   [1, 1, ... , 1]
+    #   [True, False, ... , False],
+    #   [True, True,  ... , False],
+    #   [True, True,  ... , False],
+    #   [True, True,  ... , True ]
     # ]]
-    # size x size
-    return torch.triu(torch.ones(size, size), diagonal=1).type(torch.int) == 0
+    # 1 x size x size
+    idx = torch.arange(size, dtype=torch.int)
+    return (idx[None, :, None] >= idx[None, None, :]) # mask[i, j] = True if i ≥ j, else False.
 
+@torch.no_grad()
+def get_casual_and_prefix_mask(size: int, prefix_boundaries: list[tuple[int, int]]) -> torch.Tensor:
+    mask = get_casual_mask(size)
+    
+    for start, end in prefix_boundaries:
+        mask[0, start:, :end + 1] = True
+    
+    return mask
 
 def log_confidence_metrics(logits: torch.Tensor, targets: torch.Tensor, tb_logger: TensorboardLogger, global_step: int, ignore_index: int, log_interval: int=50):
     if global_step % log_interval == 0:
@@ -82,10 +92,10 @@ def validate(model: GPTmodel, data_loader: DataLoader, loss_func: nn.CrossEntrop
         # (N_BATCHES, SEQ_LEN)
         decoder_input: torch.Tensor = batch[0].to(DEVICE)
         label: torch.Tensor         = batch[1].to(DEVICE)
-
-        # (SEQ_LEN, SEQ_LEN)
-        decoder_mask: torch.Tensor = get_lookback_mask(decoder_input.shape[1]).to(DEVICE)
-
+        
+        # (N_BATCHES, SEQ_LEN, SEQ_LEN)
+        decoder_mask: torch.Tensor  = batch[2].to(DEVICE)
+        
         with torch.autocast(DEVICE.type, enabled=MIXED_PRECISION_ENABLED):
             # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
             logits: torch.Tensor = model(decoder_input, decoder_mask)

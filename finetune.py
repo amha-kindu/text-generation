@@ -13,7 +13,7 @@ from model import GPTmodel
 from tensorboard_logger import TensorboardLogger
 from lr_schedulers import LRScheduler, get_lr_scheduler
 from dataset import MultiTaskDataset, ShardedMultiTaskDataset,TemperatureSampler, FineTuningDataset, NLPDataset
-from utils import EarlyStopping, get_lookback_mask, log_confidence_metrics, save_checkpoint, set_trainable_params, validate
+from utils import EarlyStopping, log_confidence_metrics, save_checkpoint, set_trainable_params, validate
 
 
 def finetune(config: TrainingConfig, model: GPTmodel, finetune_dataset: NLPDataset, val_dataset: ShardedMultiTaskDataset, training_state: TrainingState | None = None) -> None:
@@ -23,7 +23,7 @@ def finetune(config: TrainingConfig, model: GPTmodel, finetune_dataset: NLPDatas
     tb_logger.log_text("ModelConfig", f"```json\n{json.dumps(model.config.__dict__, indent=2)}\n```", step=0)
     tb_logger.log_text("Environment", f"```json\n{json.dumps(ENV, indent=2)}\n```", step=0)
     
-    scaler = torch.GradScaler(device=DEVICE.type) if MIXED_PRECISION_ENABLED else None
+    scaler = torch.GradScaler(init_scale=config.grad_scaler_init, device=DEVICE.type) if MIXED_PRECISION_ENABLED else None
 
     early_stopping = EarlyStopping(patience=config.es_patience, min_delta=config.es_min_delta)
 
@@ -67,10 +67,10 @@ def finetune(config: TrainingConfig, model: GPTmodel, finetune_dataset: NLPDatas
             # (N_BATCHES, SEQ_LEN)
             decoder_input: torch.Tensor = batch[0].to(DEVICE)
             label: torch.Tensor         = batch[1].to(DEVICE)
-
-            # (SEQ_LEN, SEQ_LEN)
-            decoder_mask: torch.Tensor = get_lookback_mask(decoder_input.shape[1]).to(DEVICE)
-
+            
+            # (N_BATCHES, SEQ_LEN, SEQ_LEN)
+            decoder_mask: torch.Tensor  = batch[2].to(DEVICE)
+            
             with torch.autocast(device_type=DEVICE.type, enabled=MIXED_PRECISION_ENABLED):
                 # (N_BATCHES, SEQ_LEN, VOCAB_SIZE)
                 logits: torch.Tensor = model(decoder_input, decoder_mask)

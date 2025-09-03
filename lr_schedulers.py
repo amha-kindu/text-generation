@@ -23,12 +23,13 @@ def get_lr_scheduler(optimizer: Optimizer, config: TrainingConfig, embed_dim: in
         return WarmupCosineLR(optimizer, config.warmup_steps, config.updates_per_epoch, config.min_lr)
     elif config.lr_scheduler == LRScheduler.INVERSE_SQRT.value:
         # Adjust the scale so that learning rate peaks at config.init_lr
-        scale = config.init_lr / (embed_dim * config.warmup_steps) ** 0.5
+        base_lr = optimizer.param_groups[0]['lr']
+        scale = (config.init_lr) / base_lr * (embed_dim * config.warmup_steps) ** 0.5
         return InverseSqrtLR(optimizer, config.warmup_steps, embed_dim, config.min_lr, scale)
 
 
-def _with_floor(lrs: List[float], min_lr: float) -> List[float]:
-    if min_lr is None:
+def _with_floor(step: int, warmup_steps: int, lrs: List[float], min_lr: float) -> List[float]:
+    if min_lr is None or step < warmup_steps:
         return lrs
     return [max(min_lr, x) for x in lrs]
 
@@ -55,12 +56,12 @@ class WarmupCosineLR(_LRScheduler):
         if t < self.warmup_steps:
             warm_frac = t / max(1, self.warmup_steps)
             lrs = [base * warm_frac for base in self.base_lrs]
-            return _with_floor(lrs, self.min_lr)
+            return _with_floor(t, self.warmup_steps, lrs, self.min_lr)
         # cosine phase
         progress = (t - self.warmup_steps) / max(1, (self.total_steps - self.warmup_steps))
         cos_factor = 0.5 * (1.0 + math.cos(math.pi * progress))  # 1 -> 0
         lrs = [self.min_lr + (base - self.min_lr) * cos_factor for base in self.base_lrs]
-        return _with_floor(lrs, self.min_lr)
+        return _with_floor(t, self.warmup_steps, lrs, self.min_lr)
 
 
 class WarmupLinearLR(_LRScheduler):
@@ -79,12 +80,12 @@ class WarmupLinearLR(_LRScheduler):
         if t < self.warmup_steps:
             warm_frac = t / max(1, self.warmup_steps)
             lrs = [base * warm_frac for base in self.base_lrs]
-            return _with_floor(lrs, self.min_lr)
+            return _with_floor(t, self.warmup_steps, lrs, self.min_lr)
         # linear decay
         progress = (t - self.warmup_steps) / max(1, (self.total_steps - self.warmup_steps))
         decay = 1.0 - progress
         lrs = [self.min_lr + (base - self.min_lr) * max(0.0, decay) for base in self.base_lrs]
-        return _with_floor(lrs, self.min_lr)
+        return _with_floor(t, self.warmup_steps, lrs, self.min_lr)
 
 
 class WarmupConstantLR(_LRScheduler):
@@ -102,8 +103,8 @@ class WarmupConstantLR(_LRScheduler):
         if t < self.warmup_steps:
             warm_frac = t / max(1, self.warmup_steps)
             lrs = [base * warm_frac for base in self.base_lrs]
-            return _with_floor(lrs, self.min_lr)
-        return _with_floor(self.base_lrs, self.min_lr)
+            return _with_floor(t, self.warmup_steps, lrs, self.min_lr)
+        return _with_floor(t, self.warmup_steps, self.base_lrs, self.min_lr)
 
 
 class InverseSqrtLR(_LRScheduler):
@@ -135,4 +136,4 @@ class InverseSqrtLR(_LRScheduler):
         factor = (self.d_model ** -0.5) * min(step ** -0.5, step * (self.warmup_steps ** -1.5))
         factor *= self.scale
         lrs = [base * factor for base in self.base_lrs]
-        return _with_floor(lrs, self.min_lr)
+        return _with_floor(step, self.warmup_steps, lrs, self.min_lr)

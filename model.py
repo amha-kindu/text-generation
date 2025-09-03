@@ -1,6 +1,8 @@
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn.attention import SDPBackend
 
 from config import *
 from lora import LoRAdapter
@@ -89,39 +91,26 @@ class MultiHeadAttentionBlock(nn.Module):
                 key_past, value_past = kv_cache
                 
                 # (N_BATCHES, CACHE_SIZE + SEQ_LEN, EMBED_DIM)
-                key = torch.cat([key_past, key], dim=2)
-                value = torch.cat([value_past, value], dim=2)
+                key = torch.cat([key_past, key], dim=1)
+                value = torch.cat([value_past, value], dim=1)
             kv_cache = key, value
 
         # (N_BATCHES, SEQ_LEN, EMBED_DIM) --> (N_BATCHES, SEQ_LEN, HEADS, d_head) --> (N_BATCHES, HEADS, SEQ_LEN, d_head)
         query = query.view(query.shape[0], query.shape[1], self.heads, -1).transpose(1, 2)
         key = key.view(key.shape[0], key.shape[1], self.heads, -1).transpose(1, 2)
         value = value.view(value.shape[0], value.shape[1], self.heads, -1).transpose(1, 2)
-
-        # (N_BATCHES, HEADS, SEQ_LEN, d_head) @ (N_BATCHES, HEADS, d_head, SEQ_LEN)
-        # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
-        attention_scores = (query @ key.transpose(2, 3)) / math.sqrt(self.d_head)
         
-        assert mask.dtype == torch.bool, f"Mask must be boolean, got {mask.dtype}"
-        
-        if MIXED_PRECISION_ENABLED:
-            attention_scores = attention_scores.to(torch.float32)
-            
-        attention_scores.masked_fill_(mask == False, -1e09)
-
-        # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
-        attention_scores = torch.softmax(
-            attention_scores, dim=-1
-        )
-
-        if MIXED_PRECISION_ENABLED:
-            attention_scores = attention_scores.to(torch.float16)
-
-        attention_scores = self.dropout(attention_scores)
-
-        # (N_BATCHES, head, SEQ_LEN, SEQ_LEN) @ (N_BATCHES, head, SEQ_LEN, d_head)
-        # (N_BATCHES, head, SEQ_LEN, d_head)
-        output: torch.Tensor = attention_scores @ value
+        with torch.nn.attention.sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]):
+            # Step 1: attn_scores = (query @ key.transpose(2, 3)) / math.sqrt(self.d_head)
+            # Step 2: attn_scores.masked_fill_(mask == False, -1e09)
+            # Step 3: attn_probs = F.softmax(attn_scores, dim=-1)
+            # Step 4: output = (attn_probs @ value)
+            output = F.scaled_dot_product_attention(
+                query, key, value,
+                attn_mask=mask,
+                dropout_p=self.dropout.p if self.training else 0.0,
+                is_causal=(mask is None)
+            )
 
         # (N_BATCHES, head, SEQ_LEN, d_head) -> (N_BATCHES, SEQ_LEN, head, d_head)
         output = output.transpose(1, 2)
