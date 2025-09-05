@@ -1,5 +1,4 @@
 import os
-import math
 import json
 import torch
 import argparse
@@ -8,18 +7,18 @@ from tqdm import tqdm
 import sentencepiece as spm
 from datetime import datetime
 import torch.distributed as dist
-from torch.utils.data import DistributedSampler
+from torch.utils.data import DistributedSampler, RandomSampler
 from torch.nn.parallel import DistributedDataParallel
 
 from config import *
 from model import GPTmodel
 from tensorboard_logger import TensorboardLogger
 from lr_schedulers import LRScheduler, get_lr_scheduler
-from dataset import ShardedDataset, TextStreamDataset, TextDataset, NLPDataset
-from utils import EarlyStopping, get_casual_mask, log_confidence_metrics, save_checkpoint, validate
+from dataset import TextStreamDataset, TextDataset, NLPDataset
+from utils import EarlyStopping, log_confidence_metrics, save_checkpoint, validate
 
 
-def train(config: TrainingConfig, model: GPTmodel, train_dataset: NLPDataset, val_dataset: ShardedDataset, is_distributed: bool = False, training_state: TrainingState | None = None) -> None:
+def train(config: TrainingConfig, model: GPTmodel, train_dataset: NLPDataset, val_dataset: NLPDataset, is_distributed: bool = False, training_state: TrainingState | None = None) -> None:
     tb_logger = TensorboardLogger(config.tb_log_dir)
     
     tb_logger.log_text("TrainingConfig", f"```json\n{json.dumps(config.__dict__, indent=2)}\n```", step=0)
@@ -50,7 +49,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: NLPDataset, va
     validation_loss = 0
     if training_state:
         global_step = training_state.global_step + 1
-        initial_epoch = math.floor(training_state.global_step / config.updates_per_epoch)
+        initial_epoch = int(training_state.global_step / config.steps_per_epoch)
         training_loss = training_state.training_loss
         validation_loss = training_state.validation_loss
         early_stopping.best_loss = training_state.best_val_loss
@@ -61,9 +60,12 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: NLPDataset, va
     
     train_sampler = DistributedSampler(train_dataset, num_replicas=WORLD_SIZE, rank=GLOBAL_RANK, shuffle=True, drop_last=True) if is_distributed else None
     data_loader = train_dataset.get_loader(config.batch_size, sampler=train_sampler)
+    
+    val_sampler = RandomSampler(val_dataset, replacement=True, num_samples=config.batch_size * int(1.5 * config.validate_every * config.grad_accum_steps))
+    val_loader = val_dataset.get_loader(config.batch_size, sampler=val_sampler)
 
     for epoch in range(initial_epoch, config.epochs):
-        data_loader = tqdm(data_loader, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch+1}/{config.epochs}", disable = GLOBAL_RANK != COORDINATOR_RANK, total=config.samples_per_epoch)
+        data_loader = tqdm(data_loader, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch+1}/{config.epochs}", disable = GLOBAL_RANK != COORDINATOR_RANK, total=config.batches_per_epoch)
         for i, batch in enumerate(data_loader):
             model.train()
             
@@ -95,7 +97,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: NLPDataset, va
                 torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
             accum_loss += loss_tensor.item() / WORLD_SIZE
 
-            accum_grad = (i + 1) % config.grad_accum_steps != 0 and i + 1 != config.samples_per_epoch
+            accum_grad = (i + 1) % config.grad_accum_steps != 0 and i + 1 != config.batches_per_epoch
 
             if MIXED_PRECISION_ENABLED:
                 scaler.scale(batch_loss).backward()
@@ -129,7 +131,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: NLPDataset, va
                 if global_step % config.validate_every == 0:
                     val_loss = validate(
                         model=model.module if is_distributed else model,
-                        data_loader=val_dataset.next_loader(config.batch_size),
+                        data_loader=val_loader,
                         loss_func=loss_func
                     )
                     if is_distributed:
@@ -285,15 +287,8 @@ if __name__ == "__main__":
     else:
         val_dataset = TextDataset(training_config.validation_data, tokenizer, model_config.seq_len)
     
-    training_config.samples_per_epoch = math.floor(len(train_dataset) / (training_config.batch_size * WORLD_SIZE))
-    training_config.updates_per_epoch = math.floor(training_config.samples_per_epoch / training_config.grad_accum_steps)
-    
-    shards = training_config.updates_per_epoch // training_config.validate_every
-    val_dataset = ShardedDataset(
-        shards=shards,
-        dataset=val_dataset,
-        workers=training_config.workers,
-    )
+    training_config.batches_per_epoch = int(len(train_dataset) / (training_config.batch_size * WORLD_SIZE))
+    training_config.steps_per_epoch = int(training_config.batches_per_epoch / training_config.grad_accum_steps)
     
     model = GPTmodel.build(model_config, weights).to(DEVICE)
     

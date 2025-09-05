@@ -112,10 +112,10 @@ class MultiHeadAttentionBlock(nn.Module):
                 is_causal=(mask is None)
             )
 
-        # (N_BATCHES, head, SEQ_LEN, d_head) -> (N_BATCHES, SEQ_LEN, head, d_head)
+        # (N_BATCHES, HEADS, SEQ_LEN, d_head) -> (N_BATCHES, SEQ_LEN, HEADS, d_head)
         output = output.transpose(1, 2)
 
-        # (N_BATCHES, SEQ_LEN, head, d_head) -> (N_BATCHES, SEQ_LEN, EMBED_DIM)
+        # (N_BATCHES, SEQ_LEN, HEADS, d_head) -> (N_BATCHES, SEQ_LEN, EMBED_DIM)
         output = output.contiguous().view(value.shape[0], value.shape[2], -1)
         
         return self.Wo(output), kv_cache

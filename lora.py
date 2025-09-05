@@ -8,21 +8,27 @@ class LoRAdapter(nn.Module):
         super().__init__()
         assert rank > 0, "rank must be > 0"
         
-        self.base = base
-        for p in self.base.parameters():
-            p.requires_grad = False
+        # Snapshot base weights as immutable buffers (not Parameters)
+        self.register_buffer("base_weight", base.weight.detach().clone())
+        if base.bias is not None:
+            self.register_buffer("base_bias", base.bias.detach().clone())
+        else:
+            self.base_bias = None
 
         self.rank = rank
         self.merged = False
         self.dropout = nn.Dropout(dropout)
         self.scaling = alpha / max(1, rank)
 
-        self.down = nn.Parameter(torch.empty(base.in_features, rank, dtype=self.base.weight.dtype))
-        self.up = nn.Parameter(torch.empty(rank, base.out_features, dtype=self.base.weight.dtype))
+        self.down = nn.Parameter(torch.empty(base.in_features, rank, dtype=base.weight.dtype))
+        self.up = nn.Parameter(torch.empty(rank, base.out_features, dtype=base.weight.dtype))
 
         # LoRA paper: down ~ N(0, 1/r), up = 0
         nn.init.normal_(self.down, mean=0.0, std=1 / max(1, rank))
         nn.init.zeros_(self.up)
+    
+    def base(self, x: torch.Tensor) -> nn.Linear:
+        return F.linear(x, self.base_weight, self.base_bias)
 
     @torch.no_grad()
     def merge(self):
@@ -31,7 +37,9 @@ class LoRAdapter(nn.Module):
         
         # (OUT_DIM, RANK) @ (RANK, IN_DIM) --> (OUT_DIM, IN_DIM)
         delta_w = F.linear(self.up.t(), self.down, bias=None)
-        self.base.weight.add_(delta_w.to(self.base.weight.dtype), alpha=self.scaling)
+        self.base_weight.add_(
+            delta_w.to(self.base_weight.dtype), alpha=self.scaling
+        )
         self.merged = True
     
     @torch.no_grad()
@@ -40,8 +48,10 @@ class LoRAdapter(nn.Module):
             return
         
         # (OUT_DIM, RANK) @ (RANK, IN_DIM) --> (OUT_DIM, IN_DIM)
-        delta_w = F.linear(self.up.t(), self.down, bias=None)
-        self.base.weight.sub_(delta_w.to(self.base.weight.dtype), alpha=self.scaling)
+        delta_w = F.linear(self.up.t(), self.down, bias=None)        
+        self.base_weight.sub_(
+            delta_w.to(self.base_weight.dtype), alpha=self.scaling
+        )
         self.merged = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

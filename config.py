@@ -117,8 +117,8 @@ class ModelWithLoRAConfig(ModelConfig):
 class TrainingConfig(Config):
     def __init__(self, **kwargs):
         kwargs = { k: v for k, v in kwargs.items() if v is not None}
-        self.samples_per_epoch = None
-        self.updates_per_epoch = None
+        self.steps_per_epoch = None
+        self.batches_per_epoch = None
         self.workers: int = kwargs.get("dl_workers", 0)
         self.epochs: int = kwargs.get("epochs", 10)
         self.batch_size: int = kwargs.get("batch_size", 64)

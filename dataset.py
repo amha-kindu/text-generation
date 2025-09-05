@@ -226,7 +226,7 @@ class FineTuningDataset(NLPDataset):
             if start is None and input[i] in [self.user_token, self.system_token]:
                 start = i
             elif input[i] == self.bot_token and start is not None:
-                prefix_boundaries.append((start, i - 1))
+                prefix_boundaries.append((start + 1, i - 1))
                 start = None
         return prefix_boundaries
     
@@ -338,104 +338,24 @@ class MultiTaskDataset(Dataset):
 
 
 class TemperatureSampler(Sampler[int]):
-    def __init__(self, mt_dataset: MultiTaskDataset, alpha: float = 0.5,
-                 steps_per_epoch: int | None = None):
+    def __init__(self, mt_dataset: MultiTaskDataset, iter_size: int, alpha: float = 0.5):
         self.alpha = alpha
         self.mt = mt_dataset
+        self.iter_size = iter_size
         self.lengths = torch.tensor(self.mt.lengths, dtype=torch.float)
         self.offsets = torch.tensor(self.mt.offsets, dtype=torch.long)
         
         weights = (self.lengths.clamp(min=1.0)) ** alpha # probs ∝ n^alpha
         self.task_probs = (weights / weights.sum()).tolist()
-        self.steps_per_epoch = steps_per_epoch or sum(self.mt.lengths)
 
     def __len__(self):
-        return self.steps_per_epoch
+        return self.iter_size
 
     def __iter__(self):
         probs = torch.tensor(self.task_probs, dtype=torch.float)
-        for _ in range(self.steps_per_epoch):
+        for _ in range(self.iter_size):
             task = torch.multinomial(probs, 1).item()
             local_len = int(self.lengths[task].item())
             j = random.randrange(local_len)
             global_index = self.offsets[task].item() + j
             yield global_index
-
-
-class IShardedDataset(ABC):
-    def __init__(self, shards: int, workers: int = 0):
-        assert shards >= 1
-        self._round = 0
-        self.shards = shards
-        self.workers = workers
-    
-    @abstractmethod
-    def _dataset_for(self, shard_idx: int) -> Dataset:
-        raise NotImplementedError
-    
-    @staticmethod
-    def _even_splits(n: int, k: int):
-        base, rem = divmod(n, k)
-        splits, start = [], 0
-        for i in range(k):
-            end = start + base + (1 if i < rem else 0)
-            splits.append((start, end))
-            start = end
-        return splits
-    
-    def get_loader(self, batch_size: int, shard_idx: int = 0) -> DataLoader:
-        ds = self._dataset_for(shard_idx)
-        return DataLoader(
-            dataset=ds,
-            batch_size=batch_size,
-            sampler=SequentialSampler(ds),
-            shuffle=False,
-            num_workers=self.workers,       # Number of subprocesses to use for data loading
-            pin_memory=True,                # pre-allocate batches in page-locked memory so that GPU transfers are faster and can be asynchronous
-        )
-    
-    def next_loader(self, batch_size: int) -> DataLoader:
-        shard_idx = self._round % self.shards
-        self._round += 1
-        return self.get_loader(batch_size, shard_idx=shard_idx)
-
-
-class ShardedDataset(IShardedDataset):  
-    def __init__(self, shards: int, dataset: Dataset, workers: int = 0):
-        super().__init__(shards, workers)
-        self.dataset = dataset
-        self._splits = self._even_splits(len(self.dataset), shards)
-
-    def _dataset_for(self, shard_idx: int) -> Dataset:
-        k = shard_idx % self.shards
-        s, e = self._splits[k]
-        if e > s:
-            idx = [i for i in range(s, e)]
-            return Subset(self.dataset, idx)
-        raise IndexError("Shard index out of range. Dataset is empty")
-
-
-class ShardedMultiTaskDataset(IShardedDataset):  
-    def __init__(self, shards: int, datasets: dict[str, Dataset], workers: int = 0):
-        super().__init__(shards, workers)
-        
-        self.names = list(datasets.keys())
-        self.datasets = [datasets[n] for n in self.names]
-
-        self._splits = []
-        for ds in self.datasets:
-            self._splits.append(
-                ShardedDataset._even_splits(len(ds), shards)
-            )
-
-    def _dataset_for(self, shard_idx: int) -> Dataset:
-        k = shard_idx % self.shards
-        parts = []
-        for ds, splits in zip(self.datasets, self._splits):
-            s, e = splits[k]
-            if e > s:
-                idx = [i for i in range(s, e)]
-                parts.append(Subset(ds, idx))
-        if not parts:
-            raise IndexError("Shard index out of range. Dataset is empty")
-        return ConcatDataset(parts)

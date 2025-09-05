@@ -18,9 +18,9 @@ def get_lr_scheduler(optimizer: Optimizer, config: TrainingConfig, embed_dim: in
     if config.lr_scheduler == LRScheduler.WARMUP_CONSTANT.value:
         return WarmupConstantLR(optimizer, config.warmup_steps, config.min_lr)
     elif config.lr_scheduler == LRScheduler.WARMUP_LINEAR.value:
-        return WarmupLinearLR(optimizer, config.warmup_steps, config.updates_per_epoch, config.min_lr)
+        return WarmupLinearLR(optimizer, config.warmup_steps, config.epochs * config.steps_per_epoch, config.min_lr)
     elif config.lr_scheduler == LRScheduler.WARMUP_COSINE.value:
-        return WarmupCosineLR(optimizer, config.warmup_steps, config.updates_per_epoch, config.min_lr)
+        return WarmupCosineLR(optimizer, config.warmup_steps, config.epochs * config.steps_per_epoch, config.min_lr)
     elif config.lr_scheduler == LRScheduler.INVERSE_SQRT.value:
         # Adjust the scale so that learning rate peaks at config.init_lr
         base_lr = optimizer.param_groups[0]['lr']
