@@ -53,9 +53,58 @@ class PositionEncoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x + self.position_encodings[:, :x.shape[1], :].requires_grad_(False)
 
+    
+class MetricFactor(nn.Module):
+    def __init__(self, embed_dim: int, metric_dim: int, d_head: int):
+        super().__init__()
+        self.d_head = d_head
+        self.metric_dim = metric_dim
+        
+        self.gelu = nn.GELU()
+        self.linear1 = nn.Linear(embed_dim, metric_dim)
+        self.linear2 = nn.Linear(metric_dim, metric_dim * d_head)
+
+    # Input shape: x -> (N_BATCHES, SEQ_LEN, embed_dim)
+    # Output shape: (N_BATCHES, SEQ_LEN, d_head, metric_dim)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # (N_BATCHES, SEQ_LEN, embed_dim) @ (embed_dim, metric_dim) --> (N_BATCHES, SEQ_LEN, metric_dim)
+        # (N_BATCHES, SEQ_LEN, metric_dim) @ (metric_dim, metric_dim * d_head) --> (N_BATCHES, SEQ_LEN, metric_dim * d_head)
+        out: torch.Tensor = self.linear2(
+            self.gelu(self.linear1(x))
+        )
+        
+        # (N_BATCHES, SEQ_LEN, metric_dim * d_head) --> (N_BATCHES, SEQ_LEN, d_head, metric_dim)
+        return out.contiguous().view(x.shape[0], x.shape[1], self.d_head, self.metric_dim)
+    
+
+class Metric(nn.Module):
+    def __init__(self, d_head: int, metric_dim: int, epsilon: float = 0.1):
+        super().__init__()
+        self.d_head = d_head
+        self.epsilon = epsilon
+        self.metric_factor = MetricFactor(embed_dim=d_head, metric_dim=metric_dim, d_head=d_head)
+        self.register_buffer("identity", torch.eye(self.d_head, dtype=torch.float), persistent=False)
+    
+    # Input shape: x -> (N_BATCHES, HEADS, SEQ_LEN, d_head)
+    # Output shape: (N_BATCHES, HEADS, d_head, SEQ_LEN)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # (N_BATCHES, HEADS, SEQ_LEN, d_head) --> (N_BATCHES, SEQ_LEN, HEADS, d_head)
+        # (N_BATCHES, SEQ_LEN, HEADS, d_head) --> (N_BATCHES, SEQ_LEN, HEADS * d_head) = (N_BATCHES, SEQ_LEN, embed_dim)
+        target_embed = x.transpose(-3, -2).view(x.size(0), x.size(2), -1)
+        
+        #(N_BATCHES, SEQ_LEN, embed_dim) --> (N_BATCHES, SEQ_LEN, d_head, metric_dim)
+        L: torch.Tensor = self.metric_factor(target_embed)
+        
+        # (d_head, d_head) + (N_BATCHES, SEQ_LEN, d_head, metric_dim) @ (N_BATCHES, SEQ_LEN, metric_dim, d_head) --> (N_BATCHES, SEQ_LEN, d_head, d_head)
+        G = self.identity + self.epsilon * L @ L.transpose(-2, -1)
+
+        # (N_BATCHES, HEADS, SEQ_LEN, d_head) --> (N_BATCHES, HEADS, d_head, SEQ_LEN)
+        # (N_BATCHES, SEQ_LEN, d_head, d_head) @ (N_BATCHES, HEADS, d_head, SEQ_LEN) --> (N_BATCHES, HEADS, d_head, SEQ_LEN)
+        return G @ x.transpose(-2, -1)
+
 
 class MultiHeadAttentionBlock(nn.Module):
-    def __init__(self, embed_dim: int, dropout: float, heads: int):
+    def __init__(self, embed_dim: int, dropout: float, heads: int, metric_dim: int, epsilon: float):
         assert embed_dim % heads == 0, "EMBED_DIM is not divisible by heads"
 
         super().__init__()
@@ -68,6 +117,7 @@ class MultiHeadAttentionBlock(nn.Module):
         self.Wo: nn.Linear = nn.Linear(embed_dim, embed_dim, bias=False)
 
         self.dropout = nn.Dropout(dropout)
+        self.metric = Metric(self.d_head, metric_dim, epsilon)
     
     # Input shape: x -> (N_BATCHES, SEQ_LEN, EMBED_DIM), mask -> (SEQ_LEN, SEQ_LEN)
     # Output shape: (N_BATCHES, SEQ_LEN, EMBED_DIM)
@@ -100,17 +150,30 @@ class MultiHeadAttentionBlock(nn.Module):
         key = key.view(key.shape[0], key.shape[1], self.heads, -1).transpose(1, 2)
         value = value.view(value.shape[0], value.shape[1], self.heads, -1).transpose(1, 2)
         
-        with torch.nn.attention.sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]):
-            # Step 1: attn_scores = (query @ key.transpose(2, 3)) / math.sqrt(self.d_head)
-            # Step 2: attn_scores.masked_fill_(mask == False, -1e09)
-            # Step 3: attn_probs = F.softmax(attn_scores, dim=-1)
-            # Step 4: output = (attn_probs @ value)
-            output = F.scaled_dot_product_attention(
-                query, key, value,
-                attn_mask=mask,
-                dropout_p=self.dropout.p if self.training else 0.0,
-                is_causal=(mask is None)
-            )
+        # (N_BATCHES, HEADS, SEQ_LEN, d_head) @ (...) --> (N_BATCHES, HEADS, d_head, SEQ_LEN)
+        # (N_BATCHES, HEADS, SEQ_LEN, d_head) @ (N_BATCHES, HEADS, d_head, SEQ_LEN) --> (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
+        attention_scores: torch.Tensor = query @ self.metric(key) / math.sqrt(self.d_head)
+        
+        assert mask.dtype == torch.bool, f"Mask must be boolean, got {mask.dtype}"
+        
+        if MIXED_PRECISION_ENABLED:
+            attention_scores = attention_scores.to(torch.float32)
+            
+        attention_scores.masked_fill_(mask == False, -1e09)
+
+        # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
+        attention_scores = torch.softmax(
+            attention_scores, dim=-1
+        )
+
+        if MIXED_PRECISION_ENABLED:
+            attention_scores = attention_scores.to(torch.float16)
+
+        attention_scores = self.dropout(attention_scores)
+
+        # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN) @ (N_BATCHES, HEADS, SEQ_LEN, d_head)
+        # (N_BATCHES, HEADS, SEQ_LEN, d_head)
+        output: torch.Tensor = attention_scores @ value
 
         # (N_BATCHES, HEADS, SEQ_LEN, d_head) -> (N_BATCHES, SEQ_LEN, HEADS, d_head)
         output = output.transpose(1, 2)
@@ -137,11 +200,11 @@ class FeedForwardBlock(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-    def __init__(self, embed_dim: int, ff_dim: int, dropout: float, heads: int):
+    def __init__(self, embed_dim: int, ff_dim: int, dropout: float, heads: int, metric_dim: int, epsilon: float):
         super().__init__()
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
-        self.masked_multihead_attention = MultiHeadAttentionBlock(embed_dim, dropout, heads)
+        self.masked_multihead_attention = MultiHeadAttentionBlock(embed_dim, dropout, heads, metric_dim, epsilon)
         self.feed_forward = FeedForwardBlock(embed_dim, ff_dim, dropout)
         self.dropout = nn.Dropout(dropout)
     
