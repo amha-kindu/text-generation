@@ -10,6 +10,7 @@ from lora import LoRAdapter
 from model import GPTmodel
 from dataset import Conversation
 from inference import GptInferenceEngine
+from utils import get_casual_and_prefix_mask
 
 
 class ChatBot(GptInferenceEngine):
@@ -28,6 +29,22 @@ class ChatBot(GptInferenceEngine):
                 self.system_token,
                 *self.tokenizer.Encode(self.conv.system_text, out_type=int)
             ])
+            
+    def get_prefixes(self, input: torch.Tensor) -> list[tuple[int, int]]:
+        start = None
+        prefix_boundaries = []
+        for i in range(len(input)):
+            if start is None and input[i] in [self.user_token, self.system_token]:
+                start = i
+            elif input[i] == self.bot_token and start is not None:
+                prefix_boundaries.append((start + 1, i - 1))
+                start = None
+        return prefix_boundaries
+    
+    def get_attention_mask(self, input: torch.Tensor) -> torch.Tensor:
+        # (SEQ_LEN,) != (1,) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
+        return (input != self.pad_token).unsqueeze(0) & \
+            get_casual_and_prefix_mask(input.size(0), self.get_prefixes(input))
         
     def get_tokens(self, text: str) -> list[int]:
         input_ids: list[int] = []

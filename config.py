@@ -146,6 +146,7 @@ class TrainingConfig(Config):
         self.finetuning: bool = kwargs.get("finetuning", False)
         self.sampler_alpha: float = kwargs.get("sampler_alpha", 0.5)
         self.grad_scaler_init: float = kwargs.get("grad_scaler_init", 2 ** 14)
+        self.vt_ratio: float = kwargs.get("vt_ratio", 1.0)
         
         if self.training_data and not os.path.isfile(self.training_data):
             raise FileNotFoundError(f"File '{self.training_data}' does not exist")

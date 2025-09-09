@@ -7,8 +7,7 @@ import random
 import numpy as np
 import sentencepiece as spm
 from bisect import bisect_left
-from abc import ABC, abstractmethod
-from torch.utils.data import Dataset, Subset, DataLoader, Sampler, ConcatDataset, SequentialSampler
+from torch.utils.data import Dataset, DataLoader, Sampler
 
 from config import *
 from preprocessor import AmharicPreprocessor

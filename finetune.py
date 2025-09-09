@@ -61,7 +61,7 @@ def finetune(config: TrainingConfig, model: GPTmodel, finetune_dataset: MultiTas
     val_sampler = TemperatureSampler(
         val_dataset,
         alpha=training_config.sampler_alpha,
-        iter_size=config.batch_size * int(1.5 * config.validate_every * config.grad_accum_steps),
+        iter_size=config.batch_size * int(config.vt_ratio * config.validate_every * config.grad_accum_steps),
     )
     val_data_loader = finetune_dataset.get_loader(config.batch_size, sampler=val_sampler)
 
@@ -187,6 +187,7 @@ if __name__ == "__main__":
     parser.add_argument("--warmup-steps", type=int, help="Number of warmup steps")
     parser.add_argument("--save-every", type=int, help="Number of weight updates between checkpoints")
     parser.add_argument("--validate-every", type=int, help="Number of weight updates between validations")
+    parser.add_argument("--vt-ratio", type=float, help="The ratio between the number of samples to validate the model on and the number of samples it has seen, since the last validation")
     parser.add_argument("--init-lr", type=float, help="Initial learning rate")
     parser.add_argument("--min-lr", type=float, help="Minimum learning rate")
     parser.add_argument("--lr-scheduler", type=str, choices=[LRScheduler.WARMUP_CONSTANT.value, LRScheduler.WARMUP_LINEAR.value, LRScheduler.WARMUP_COSINE.value, LRScheduler.INVERSE_SQRT.value], help="Learning rate scheduler(default: warmup_linear)")

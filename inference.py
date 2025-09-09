@@ -85,20 +85,25 @@ class GptInferenceEngine:
             
             # frequency + presence penalties (OpenAI-style)
             logits[..., token_id] = logits[..., token_id] - (fp * float(count) + pp)
+            
+    def get_attention_mask(self, input: torch.Tensor) -> torch.Tensor:
+        # (SEQ_LEN,) != (1,) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
+        return (input != self.pad_token).unsqueeze(0) & \
+            get_casual_mask(input.size(0))
 
     @torch.no_grad()
     def complete(self, token_ids: list[int]) -> Iterator[int]:
         while token_ids and len(token_ids) < self.max_len:
             decoder_input = torch.tensor(
-                token_ids,
+                [token_ids],
                 dtype=torch.int64
-            ).to(DEVICE).unsqueeze(0)
+            )
             
-            decoder_mask = get_casual_mask(len(token_ids)).to(DEVICE)
+            decoder_mask = self.get_attention_mask(decoder_input.view(-1)).to(DEVICE)
                         
             with torch.autocast(device_type=DEVICE.type, enabled=MIXED_PRECISION_ENABLED):
                 # (1, SEQ_LEN, VOCAB_SIZE)
-                logits = self.model(decoder_input, decoder_mask, self.use_kv_cache, self.kv_caches)
+                logits = self.model(decoder_input.to(DEVICE), decoder_mask, self.use_kv_cache, self.kv_caches)
 
             # (1, VOCAB_SIZE)
             # Take logits for the last position and apply temperature scaling

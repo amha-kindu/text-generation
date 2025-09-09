@@ -61,7 +61,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: NLPDataset, va
     train_sampler = DistributedSampler(train_dataset, num_replicas=WORLD_SIZE, rank=GLOBAL_RANK, shuffle=True, drop_last=True) if is_distributed else None
     data_loader = train_dataset.get_loader(config.batch_size, sampler=train_sampler)
     
-    val_sampler = RandomSampler(val_dataset, replacement=True, num_samples=config.batch_size * int(1.5 * config.validate_every * config.grad_accum_steps))
+    val_sampler = RandomSampler(val_dataset, replacement=True, num_samples=config.batch_size * int(config.vt_ratio * config.validate_every * config.grad_accum_steps))
     val_loader = val_dataset.get_loader(config.batch_size, sampler=val_sampler)
 
     for epoch in range(initial_epoch, config.epochs):
@@ -165,7 +165,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: NLPDataset, va
                         "val_loss": f"{validation_loss:6.3f}"
                     })
                     
-                    log_confidence_metrics(logits.detach(), label.detach(), tb_logger, global_step, train_dataset.ignore_index)
+                    log_confidence_metrics(logits.detach(), label.detach(), tb_logger, global_step, train_dataset.ignore_index, config.steps_per_epoch // 2)
                     
                     if global_step and global_step % config.save_every == 0:
                         save_checkpoint(
