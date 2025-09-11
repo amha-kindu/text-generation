@@ -153,7 +153,7 @@ def finetune(config: TrainingConfig, model: GPTmodel, finetune_dataset: MultiTas
                         "val_loss": f"{validation_loss:6.3f}"
                     })
                     
-                    log_confidence_metrics(logits.detach(), label.detach(), tb_logger, global_step, finetune_dataset.ignore_index)
+                    log_confidence_metrics(logits.detach(), label.detach(), tb_logger, global_step, finetune_dataset.ignore_index, config.steps_per_epoch // 2)
                     
                     if global_step and global_step % config.save_every == 0:
                         save_checkpoint(
@@ -286,7 +286,7 @@ if __name__ == "__main__":
         datasets={
             intent: FineTuningDataset(intent, training_config.training_data, tokenizer, model_config.seq_len) for intent in intents
         },
-        workers=training_config.workers
+        workers=training_config.dl_workers
     )
     samples = len(finetune_dataset)
     
@@ -297,7 +297,7 @@ if __name__ == "__main__":
         datasets={
             intent: FineTuningDataset(intent, training_config.validation_data, tokenizer, model_config.seq_len) for intent in intents
         },
-        workers=training_config.workers,
+        workers=training_config.dl_workers,
     )
     
     model = GPTmodel.build(model_config, weights).to(DEVICE)

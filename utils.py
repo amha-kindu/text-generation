@@ -50,15 +50,6 @@ def get_casual_mask(size: int) -> torch.Tensor:
     idx = torch.arange(size, dtype=torch.int)
     return (idx[None, :, None] >= idx[None, None, :]) # mask[i, j] = True if i ≥ j, else False.
 
-@torch.no_grad()
-def get_casual_and_prefix_mask(size: int, prefix_boundaries: list[tuple[int, int]]) -> torch.Tensor:
-    mask = get_casual_mask(size)
-    
-    for start, end in prefix_boundaries:
-        mask[0, start:, :end + 1] = True
-    
-    return mask
-
 def log_confidence_metrics(logits: torch.Tensor, targets: torch.Tensor, tb_logger: TensorboardLogger, global_step: int, ignore_index: int, log_interval: int=50):
     if global_step % log_interval == 0:
         # Compute softmax probabilities

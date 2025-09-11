@@ -119,7 +119,7 @@ class TrainingConfig(Config):
         kwargs = { k: v for k, v in kwargs.items() if v is not None}
         self.steps_per_epoch = None
         self.batches_per_epoch = None
-        self.workers: int = kwargs.get("dl_workers", 0)
+        self.dl_workers: int = kwargs.get("dl_workers", 0)
         self.epochs: int = kwargs.get("epochs", 10)
         self.batch_size: int = kwargs.get("batch_size", 64)
         self.grad_accum_steps: int = kwargs.get("grad_accum_steps", 1)

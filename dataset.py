@@ -11,7 +11,7 @@ from torch.utils.data import Dataset, DataLoader, Sampler
 
 from config import *
 from preprocessor import AmharicPreprocessor
-from utils import Conversation, get_casual_and_prefix_mask, get_casual_mask
+from utils import Conversation, get_casual_mask
 
 
 class NLPDataset(Dataset):
@@ -93,8 +93,7 @@ class TextDataset(NLPDataset):
         input, output = self.samples[index]
         
         # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
-        mask = (input != self.pad_token).unsqueeze(0) & \
-            get_casual_mask(self.max_len)
+        mask = (input != self.pad_token) & get_casual_mask(self.max_len)
         
         return input, output, mask
     
@@ -157,9 +156,8 @@ class TextStreamDataset(NLPDataset):
             text=json.loads(line.strip())
         )
         
-        # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
-        mask = (input != self.pad_token).unsqueeze(0) & \
-            get_casual_mask(self.max_len)
+        # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (SEQ_LEN,) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
+        mask = (input != self.pad_token) & get_casual_mask(self.max_len)
         
         return input, output, mask
 
@@ -209,25 +207,13 @@ class FineTuningDataset(NLPDataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, index) -> dict:
+    def __getitem__(self, index: int) -> dict:
         input, output = self.samples[index]
         
-        # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (1, SEQ_LEN) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
-        mask = (input != self.pad_token).unsqueeze(0) & \
-            get_casual_and_prefix_mask(self.max_len, self.get_prefixes(input))
-            
+        # (SEQ_LEN,) != (1,) --> (SEQ_LEN,) --> (SEQ_LEN,) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
+        mask = (input != self.pad_token) & get_casual_mask(self.max_len)
+        
         return input, output, mask
-    
-    def get_prefixes(self, input: torch.Tensor) -> list[tuple[int, int]]:
-        start = None
-        prefix_boundaries = []
-        for i in range(len(input)):
-            if start is None and input[i] in [self.user_token, self.system_token]:
-                start = i
-            elif input[i] == self.bot_token and start is not None:
-                prefix_boundaries.append((start + 1, i - 1))
-                start = None
-        return prefix_boundaries
     
     def get_io_tensors(self, conv: Conversation) -> tuple[torch.Tensor, torch.Tensor]:
         # System:              K L M N O

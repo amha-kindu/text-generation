@@ -276,9 +276,9 @@ if __name__ == "__main__":
     if args.stream or os.path.getsize(training_config.training_data) > 200 * 1024 * 1024:
         if GLOBAL_RANK == COORDINATOR_RANK:
             LOGGER.info(f"File '{os.path.basename(training_config.training_data)}' too large! streaming file...")
-        train_dataset = TextStreamDataset(training_config.training_data, tokenizer, model_config.seq_len, training_config.workers)
+        train_dataset = TextStreamDataset(training_config.training_data, tokenizer, model_config.seq_len, training_config.dl_workers)
     else:
-        train_dataset = TextDataset(training_config.training_data, tokenizer, model_config.seq_len, training_config.workers)
+        train_dataset = TextDataset(training_config.training_data, tokenizer, model_config.seq_len, training_config.dl_workers)
             
     if args.stream or os.path.getsize(training_config.validation_data) > 200 * 1024 * 1024:
         if GLOBAL_RANK == COORDINATOR_RANK:

@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from config import *
 from model import GPTmodel
 from cache import SlidingKVCache
-from utils import get_casual_and_prefix_mask, get_casual_mask
+from utils import get_casual_mask
 from preprocessor import AmharicPreprocessor
 
 
@@ -85,11 +85,6 @@ class GptInferenceEngine:
             
             # frequency + presence penalties (OpenAI-style)
             logits[..., token_id] = logits[..., token_id] - (fp * float(count) + pp)
-            
-    def get_attention_mask(self, input: torch.Tensor) -> torch.Tensor:
-        # (SEQ_LEN,) != (1,) --> (1, SEQ_LEN) & (1, SEQ_LEN, SEQ_LEN) --> (1, SEQ_LEN, SEQ_LEN)
-        return (input != self.pad_token).unsqueeze(0) & \
-            get_casual_mask(input.size(0))
 
     @torch.no_grad()
     def complete(self, token_ids: list[int]) -> Iterator[int]:
@@ -97,13 +92,13 @@ class GptInferenceEngine:
             decoder_input = torch.tensor(
                 [token_ids],
                 dtype=torch.int64
-            )
+            ).to(DEVICE)
             
-            decoder_mask = self.get_attention_mask(decoder_input.view(-1)).to(DEVICE)
+            decoder_mask = get_casual_mask(decoder_input.size(1)).to(DEVICE)
                         
             with torch.autocast(device_type=DEVICE.type, enabled=MIXED_PRECISION_ENABLED):
                 # (1, SEQ_LEN, VOCAB_SIZE)
-                logits = self.model(decoder_input.to(DEVICE), decoder_mask, self.use_kv_cache, self.kv_caches)
+                logits = self.model(decoder_input, decoder_mask, self.use_kv_cache, self.kv_caches)
 
             # (1, VOCAB_SIZE)
             # Take logits for the last position and apply temperature scaling
@@ -140,12 +135,8 @@ class GptInferenceEngine:
 
             # Re-normalize; if everything got masked, fall back to argmax
             denom = probs.sum(dim=-1, keepdim=True)
-            if torch.all(denom <= 0):
-                print("WARNING: all probabilities are zero, falling back to argmax")
-                predicted_token = torch.argmax(next_token_logits, dim=-1).item()
-            else:
-                probs = probs / denom.clamp_min(1e-12)
-                predicted_token = torch.multinomial(probs, num_samples=1).item()
+            probs = probs / denom.clamp_min(1e-12)
+            predicted_token = torch.multinomial(probs, num_samples=1).item()
             
             if predicted_token == self.stop_token:
                 break
