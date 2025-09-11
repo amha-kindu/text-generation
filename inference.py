@@ -53,7 +53,7 @@ class GptInferenceEngine:
     def _ban_tokens(self, logits: torch.Tensor, banned_token_ids: list[int]) -> None:
         for token_id in banned_token_ids:
             if token_id >= 0:
-                logits[..., token_id] = -float("inf")
+                logits[token_id] = -float("inf")
                 
     def _no_repeat_ngrams_ids(self, history: list[int], n: int) -> list[int]:
         if n <= 1 or len(history) < n-1:
@@ -79,12 +79,12 @@ class GptInferenceEngine:
             if token_id < 0: 
                 continue
             
-            val = logits[..., token_id]
+            val = logits[token_id]
             # HF-style repetition penalty
-            logits[..., token_id] = torch.where(val > 0, val / rp, val * rp)
+            logits[token_id] = torch.where(val > 0, val / rp, val * rp)
             
             # frequency + presence penalties (OpenAI-style)
-            logits[..., token_id] = logits[..., token_id] - (fp * float(count) + pp)
+            logits[token_id] = logits[token_id] - (fp * float(count) + pp)
 
     @torch.no_grad()
     def complete(self, token_ids: list[int]) -> Iterator[int]:
@@ -98,15 +98,15 @@ class GptInferenceEngine:
                         
             with torch.autocast(device_type=DEVICE.type, enabled=MIXED_PRECISION_ENABLED):
                 # (1, SEQ_LEN, VOCAB_SIZE)
-                logits = self.model(decoder_input, decoder_mask, self.use_kv_cache, self.kv_caches)
+                logits: torch.Tensor = self.model(decoder_input, decoder_mask, self.use_kv_cache, self.kv_caches)
 
-            # (1, VOCAB_SIZE)
+            # (VOCAB_SIZE,)
             # Take logits for the last position and apply temperature scaling
-            next_token_logits = logits[:, -1, :] / self.temperature
+            logits = logits[0, -1, :].float() / self.temperature
 
             # Ban control tokens and no-repeat n-gram causing tokens
             self._ban_tokens(
-                logits=next_token_logits, 
+                logits=logits, 
                 banned_token_ids=[
                     self.unk_token, self.user_token, self.bot_token, self.system_token, self.pad_token,
                     *self._no_repeat_ngrams_ids(token_ids, self.no_repeat_ngram_size)
@@ -114,29 +114,32 @@ class GptInferenceEngine:
             )
 
             # Apply presence, frequency and repetition penalties based on history
-            self._apply_penalties(next_token_logits, token_ids)
+            self._apply_penalties(logits, token_ids)
 
-            # (1, VOCAB_SIZE)
-            probs = F.softmax(next_token_logits, dim=-1)
-
-            # Top-k filtering (on probs, keeping your style)
+            # Apply Top-k filtering
             if self.top_k and self.top_k > 0:
-                top_k_probs, top_k_idx = torch.topk(probs, k=min(self.top_k, probs.size(-1)), dim=-1)
-                probs = torch.zeros_like(probs).scatter(-1, top_k_idx, top_k_probs)
-
-            # Top-p (nucleus) filtering
+                top_k_logits, top_k_idx = torch.topk(logits, k=min(self.top_k, logits.size(0)), dim=0)                
+                logits = torch.full_like(logits, float('-inf'))\
+                    .scatter(dim=0, index=top_k_idx, src=top_k_logits)
+            
+            # Apply Top-p (nucleus) filtering
             if self.top_p and self.top_p < 1.0:
-                sorted_probs, sorted_idx = torch.sort(probs, descending=True, dim=-1)
-                cprobs = torch.cumsum(sorted_probs, dim=-1)
+                sorted_logits, sorted_idx = torch.sort(logits, descending=True, dim=0)
+                sorted_probs = F.softmax(sorted_logits, dim=0)
+                cprobs = torch.cumsum(sorted_probs, dim=0)
                 mask = cprobs <= self.top_p
-                mask[..., 0] = True  # ensure at least one token
-                filtered = torch.where(mask, sorted_probs, torch.zeros_like(sorted_probs))
-                probs = torch.zeros_like(probs).scatter(-1, sorted_idx, filtered)
-
-            # Re-normalize; if everything got masked, fall back to argmax
-            denom = probs.sum(dim=-1, keepdim=True)
-            probs = probs / denom.clamp_min(1e-12)
-            predicted_token = torch.multinomial(probs, num_samples=1).item()
+                mask[0] = True  # ensure at least one token
+                logits = torch.full_like(logits, float('-inf'))\
+                    .scatter(dim=0, index=sorted_idx[mask], src=sorted_logits)
+                
+            # Apply softmax & sample next token
+            probs = F.softmax(logits, dim=0)
+            mass = probs.sum(dim=0, keepdim=True)
+            
+            if (mass <= 1e-12).any():
+                predicted_token = int(logits.argmax(dim=0).item())
+            else:
+                predicted_token = int(torch.multinomial(probs, num_samples=1).item())
             
             if predicted_token == self.stop_token:
                 break

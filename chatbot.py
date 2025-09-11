@@ -9,7 +9,6 @@ from config import *
 from lora import LoRAdapter
 from model import GPTmodel
 from dataset import Conversation
-from utils import get_casual_mask
 from inference import GptInferenceEngine
 
 
