@@ -3,8 +3,11 @@ import sys
 import torch
 import numpy
 import random
+import atexit
 import logging
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
+
 
 random.seed(4321)
 torch.manual_seed(4321)
@@ -178,31 +181,9 @@ class InferenceConfig(Config):
         self.rep_window: int = kwargs.get("rep_window", 200)
         self.kv_cache_size: int = kwargs.get("kv_cache_size", 0)
         
-
-DEFAULT_TRAINING_CONFIG = TrainingConfig()
 DEFAULT_MODEL_CONFIG = ModelConfig()
+DEFAULT_TRAINING_CONFIG = TrainingConfig()
 DEFAULT_INFERENCE_CONFIG = InferenceConfig()
 
-if __name__ == '__main__':
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Check a model training checkpoint")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint")
-
-    args = parser.parse_args()
-
-    if not os.path.exists(args.checkpoint) and not os.path.isfile(args.checkpoint):
-        raise FileNotFoundError(f"File {args.checkpoint} does not exist")
-    
-    LOGGER.info(f"Loading checkpoint from '{args.checkpoint}'...")
-    checkpoint: dict = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
-
-    model_config: ModelConfig = checkpoint["model_config"]
-    training_config: TrainingConfig = checkpoint["training_config"]
-    training_state: dict = checkpoint["training_state"]
-    
-    training_state = {k: v for k, v in training_state.items() if k not in ["optimizer_state", "lr_scheduler_state"]}
-    
-    LOGGER.info(f"Model config: {model_config}")
-    LOGGER.info(f"Training config: {training_config}")
-    LOGGER.info(f"Training state: {training_state}")
+THREAD_POOL = ThreadPoolExecutor(max_workers=os.cpu_count())
+atexit.register(THREAD_POOL.shutdown, wait=True, cancel_futures=True)

@@ -7,15 +7,15 @@ from tqdm import tqdm
 import sentencepiece as spm
 from datetime import datetime
 import torch.distributed as dist
-from torch.utils.data import DistributedSampler, RandomSampler
 from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data import DistributedSampler, RandomSampler
 
 from config import *
 from model import GPTmodel
 from tensorboard_logger import TensorboardLogger
 from lr_schedulers import LRScheduler, get_lr_scheduler
 from dataset import TextStreamDataset, TextDataset, NLPDataset
-from utils import EarlyStopping, log_confidence_metrics, save_checkpoint, validate
+from utils import EarlyStopping, log_gradients, log_confidence_metrics, save_checkpoint, validate
 
 
 def train(config: TrainingConfig, model: GPTmodel, train_dataset: NLPDataset, val_dataset: NLPDataset, is_distributed: bool = False, training_state: TrainingState | None = None) -> None:
@@ -103,8 +103,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: NLPDataset, va
                 scaler.scale(batch_loss).backward()
                 if not accum_grad:
                     scaler.unscale_(optimizer)
-                    tb_logger.log_gradients(model.parameters(), global_step)
-                    tb_logger.log_named_gradients(model.named_parameters(), global_step)
+                    log_gradients(tb_logger, {name: param.grad for name, param in model.named_parameters()}, global_step)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.max_norm)
                     scaler.step(optimizer)
                     scaler.update()
@@ -113,8 +112,7 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: NLPDataset, va
             else:
                 batch_loss.backward()
                 if not accum_grad:
-                    tb_logger.log_gradients(model.parameters(), global_step)
-                    tb_logger.log_named_gradients(model.named_parameters(), global_step)
+                    log_gradients(tb_logger, {name: param.grad for name, param in model.named_parameters()}, global_step)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.max_norm)
                     optimizer.step()
                     scheduler.step()
@@ -152,36 +150,35 @@ def train(config: TrainingConfig, model: GPTmodel, train_dataset: NLPDataset, va
                         else:
                             break                        
                 
-                if GLOBAL_RANK == COORDINATOR_RANK:
-                    if global_step % config.validate_every == 0:
-                        tb_logger.log_scalars("Loss", {"Validation": validation_loss}, global_step)
-                        tb_logger.log_scalar('Loss Gap', validation_loss - training_loss, global_step)
-                    
-                    tb_logger.log_scalars("Loss", {"Training": training_loss}, global_step)
-                    tb_logger.log_scalar("Learning Rate", scheduler.get_last_lr()[0], global_step)
-                    
-                    data_loader.set_postfix({
-                        "train_loss": f"{training_loss:6.3f}",
-                        "val_loss": f"{validation_loss:6.3f}"
-                    })
-                    
-                    log_confidence_metrics(logits.detach(), label.detach(), tb_logger, global_step, train_dataset.ignore_index, config.steps_per_epoch // 2)
-                    
-                    if global_step and global_step % config.save_every == 0:
-                        save_checkpoint(
-                            model=model.module if is_distributed else model,
+                if global_step % config.validate_every == 0:
+                    tb_logger.log_scalars("Loss", {"Validation": validation_loss}, global_step)
+                    tb_logger.log_scalar('Loss Gap', validation_loss - training_loss, global_step)
+                
+                tb_logger.log_scalars("Loss", {"Training": training_loss}, global_step)
+                tb_logger.log_scalar("Learning Rate", scheduler.get_last_lr()[0], global_step)
+                
+                data_loader.set_postfix({
+                    "train_loss": f"{training_loss:6.3f}",
+                    "val_loss": f"{validation_loss:6.3f}"
+                })
+                
+                log_confidence_metrics(tb_logger, logits.detach(), global_step)
+                
+                if GLOBAL_RANK == COORDINATOR_RANK and global_step and global_step % config.save_every == 0:
+                    save_checkpoint(
+                        model=model.module if is_distributed else model,
+                        global_step=global_step,
+                        config=config,
+                        training_state=TrainingState(
+                            epoch=epoch,
                             global_step=global_step,
-                            config=config,
-                            training_state=TrainingState(
-                                epoch=epoch,
-                                global_step=global_step,
-                                training_loss=training_loss,
-                                validation_loss=validation_loss,
-                                best_val_loss=early_stopping.best_loss,
-                                optimizer_state=optimizer.state_dict(),
-                                lr_scheduler_state=scheduler.state_dict()
-                            )
+                            training_loss=training_loss,
+                            validation_loss=validation_loss,
+                            best_val_loss=early_stopping.best_loss,
+                            optimizer_state=optimizer.state_dict(),
+                            lr_scheduler_state=scheduler.state_dict()
                         )
+                    )
 
                 global_step += 1
 
@@ -305,6 +302,7 @@ if __name__ == "__main__":
         LOGGER.info(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
     train(training_config, model, train_dataset, val_dataset, args.is_distributed, training_state)
-
+    
+    THREAD_POOL.shutdown()
     if args.is_distributed:
         dist.destroy_process_group()

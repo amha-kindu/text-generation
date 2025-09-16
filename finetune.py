@@ -12,7 +12,7 @@ from model import GPTmodel
 from tensorboard_logger import TensorboardLogger
 from lr_schedulers import LRScheduler, get_lr_scheduler
 from dataset import MultiTaskDataset, TemperatureSampler, FineTuningDataset
-from utils import EarlyStopping, log_confidence_metrics, save_checkpoint, set_trainable_params, validate
+from utils import EarlyStopping, log_confidence_metrics, log_gradients, save_checkpoint, set_trainable_params, validate
 
 
 def finetune(config: TrainingConfig, model: GPTmodel, finetune_dataset: MultiTaskDataset, val_dataset: MultiTaskDataset, training_state: TrainingState | None = None) -> None:
@@ -63,7 +63,7 @@ def finetune(config: TrainingConfig, model: GPTmodel, finetune_dataset: MultiTas
         alpha=training_config.sampler_alpha,
         iter_size=config.batch_size * int(config.vt_ratio * config.validate_every * config.grad_accum_steps),
     )
-    val_data_loader = finetune_dataset.get_loader(config.batch_size, sampler=val_sampler)
+    val_data_loader = val_dataset.get_loader(config.batch_size, sampler=val_sampler)
 
     for epoch in range(initial_epoch, config.epochs):
         data_loader = tqdm(data_loader, desc=f"\033[95m{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]}\033[0m - \033[94mINFO\033[0m - \033[96m{LOGGER.name}\033[0m - \033[93mEpoch {epoch+1}/{config.epochs}", disable = GLOBAL_RANK != COORDINATOR_RANK, total=config.batches_per_epoch)
@@ -98,8 +98,7 @@ def finetune(config: TrainingConfig, model: GPTmodel, finetune_dataset: MultiTas
                 scaler.scale(batch_loss).backward()
                 if not accum_grad:
                     scaler.unscale_(optimizer)
-                    tb_logger.log_gradients(model.parameters(), global_step)
-                    tb_logger.log_named_gradients(model.named_parameters(), global_step)
+                    log_gradients(tb_logger, {name: param.grad for name, param in model.named_parameters()}, global_step)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.max_norm)
                     scaler.step(optimizer)
                     scaler.update()
@@ -108,8 +107,7 @@ def finetune(config: TrainingConfig, model: GPTmodel, finetune_dataset: MultiTas
             else:
                 batch_loss.backward()
                 if not accum_grad:
-                    tb_logger.log_gradients(model.parameters(), global_step)
-                    tb_logger.log_named_gradients(model.named_parameters(), global_step)
+                    log_gradients(tb_logger, {name: param.grad for name, param in model.named_parameters()}, global_step)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.max_norm)
                     optimizer.step()
                     scheduler.step()
@@ -140,36 +138,35 @@ def finetune(config: TrainingConfig, model: GPTmodel, finetune_dataset: MultiTas
                         LOGGER.info(f"Early stopping triggered at epoch {epoch + 1}; avg val loss {early_stopping.best_loss:.4f} did not decrease significantly for {early_stopping.patience} consecutive weight updates")
                         break
                 
-                if GLOBAL_RANK == COORDINATOR_RANK:
-                    if global_step % config.validate_every == 0:
-                        tb_logger.log_scalars("Loss", {"Validation": validation_loss}, global_step)
-                        tb_logger.log_scalar('Loss Gap', validation_loss - training_loss, global_step)
-                    
-                    tb_logger.log_scalars("Loss", {"Training": training_loss}, global_step)
-                    tb_logger.log_scalar("Learning Rate", scheduler.get_last_lr()[0], global_step)
-                    
-                    data_loader.set_postfix({
-                        "train_loss": f"{training_loss:6.3f}",
-                        "val_loss": f"{validation_loss:6.3f}"
-                    })
-                    
-                    log_confidence_metrics(logits.detach(), label.detach(), tb_logger, global_step, finetune_dataset.ignore_index, config.steps_per_epoch // 2)
-                    
-                    if global_step and global_step % config.save_every == 0:
-                        save_checkpoint(
-                            model=model,
+                if global_step % config.validate_every == 0:
+                    tb_logger.log_scalars("Loss", {"Validation": validation_loss}, global_step)
+                    tb_logger.log_scalar('Loss Gap', validation_loss - training_loss, global_step)
+                
+                tb_logger.log_scalars("Loss", {"Training": training_loss}, global_step)
+                tb_logger.log_scalar("Learning Rate", scheduler.get_last_lr()[0], global_step)
+                
+                data_loader.set_postfix({
+                    "train_loss": f"{training_loss:6.3f}",
+                    "val_loss": f"{validation_loss:6.3f}"
+                })
+                
+                log_confidence_metrics(tb_logger, logits.detach(), global_step)
+                
+                if GLOBAL_RANK == COORDINATOR_RANK and global_step and global_step % config.save_every == 0:
+                    save_checkpoint(
+                        model=model,
+                        global_step=global_step,
+                        config=config,
+                        training_state=TrainingState(
+                            epoch=epoch,
                             global_step=global_step,
-                            config=config,
-                            training_state=TrainingState(
-                                epoch=epoch,
-                                global_step=global_step,
-                                training_loss=training_loss,
-                                validation_loss=validation_loss,
-                                best_val_loss=early_stopping.best_loss,
-                                optimizer_state=optimizer.state_dict(),
-                                lr_scheduler_state=scheduler.state_dict()
-                            )
+                            training_loss=training_loss,
+                            validation_loss=validation_loss,
+                            best_val_loss=early_stopping.best_loss,
+                            optimizer_state=optimizer.state_dict(),
+                            lr_scheduler_state=scheduler.state_dict()
                         )
+                    )
 
                 global_step += 1
     
@@ -316,7 +313,6 @@ if __name__ == "__main__":
         LOGGER.info(f"Using training config: {numerical_configs}")
         LOGGER.info(f"Initiating training with {'mixed-precision' if MIXED_PRECISION_ENABLED else 'single-precision'}...")
         LOGGER.info(f"Using model config: {model_config}")
-        LOGGER.info("Finetuning pretrained model")
         if args.lora:
             LOGGER.info("Using LoRA for finetuning")
         LOGGER.info(f"Using training config: {training_config}")
@@ -324,3 +320,5 @@ if __name__ == "__main__":
         LOGGER.info(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
     finetune(training_config, model, finetune_dataset, val_dataset, training_state)
+    
+    THREAD_POOL.shutdown()
