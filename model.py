@@ -55,26 +55,26 @@ class PositionEncoder(nn.Module):
 
     
 class MetricFactor(nn.Module):
-    def __init__(self, embed_dim: int, metric_dim: int, d_head: int):
+    def __init__(self, metric_dim: int, d_head: int):
         super().__init__()
         self.d_head = d_head
         self.metric_dim = metric_dim
         
         self.gelu = nn.GELU()
-        self.linear1 = nn.Linear(embed_dim, metric_dim)
-        self.linear2 = nn.Linear(metric_dim, metric_dim * d_head)
+        self.linear1 = nn.Linear(d_head, metric_dim)
+        self.linear2 = nn.Linear(metric_dim, d_head*d_head)
 
-    # Input shape: x -> (N_BATCHES, SEQ_LEN, embed_dim)
-    # Output shape: (N_BATCHES, SEQ_LEN, d_head, metric_dim)
+    # Input shape: x -> (N_BATCHES, HEADS, SEQ_LEN, d_head)
+    # Output shape: (N_BATCHES, HEADS, SEQ_LEN, d_head, d_head)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # (N_BATCHES, SEQ_LEN, embed_dim) @ (embed_dim, metric_dim) --> (N_BATCHES, SEQ_LEN, metric_dim)
-        # (N_BATCHES, SEQ_LEN, metric_dim) @ (metric_dim, metric_dim * d_head) --> (N_BATCHES, SEQ_LEN, metric_dim * d_head)
-        out: torch.Tensor = self.linear2(
+        # (N_BATCHES, HEADS, SEQ_LEN, d_head) @ (d_head, metric_dim) --> (N_BATCHES, HEADS, SEQ_LEN, metric_dim)
+        # (N_BATCHES, HEADS, SEQ_LEN, metric_dim) @ (metric_dim, d_head*d_head) --> (N_BATCHES, HEADS, SEQ_LEN, d_head*d_head)
+        result: torch.Tensor = self.linear2(
             self.gelu(self.linear1(x))
         )
         
-        # (N_BATCHES, SEQ_LEN, metric_dim * d_head) --> (N_BATCHES, SEQ_LEN, d_head, metric_dim)
-        return out.contiguous().view(x.shape[0], x.shape[1], self.d_head, self.metric_dim)
+        # (N_BATCHES, HEADS, SEQ_LEN, d_head*d_head) --> (N_BATCHES, HEADS, SEQ_LEN, d_head, d_head)
+        return result.view(result.shape[0], result.shape[1], result.shape[2], self.d_head, self.d_head)
     
 
 class Metric(nn.Module):
@@ -82,25 +82,20 @@ class Metric(nn.Module):
         super().__init__()
         self.d_head = d_head
         self.epsilon = epsilon
-        self.metric_factor = MetricFactor(embed_dim=d_head, metric_dim=metric_dim, d_head=d_head)
-        self.register_buffer("identity", torch.eye(self.d_head, dtype=torch.float), persistent=False)
+        self.metric_factor = MetricFactor(metric_dim, d_head)
+        self.identity = torch.eye(self.d_head, dtype=torch.float)
     
     # Input shape: x -> (N_BATCHES, HEADS, SEQ_LEN, d_head)
     # Output shape: (N_BATCHES, HEADS, d_head, SEQ_LEN)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # (N_BATCHES, HEADS, SEQ_LEN, d_head) --> (N_BATCHES, SEQ_LEN, HEADS, d_head)
-        # (N_BATCHES, SEQ_LEN, HEADS, d_head) --> (N_BATCHES, SEQ_LEN, HEADS * d_head) = (N_BATCHES, SEQ_LEN, embed_dim)
-        target_embed = x.transpose(-3, -2).view(x.size(0), x.size(2), -1)
+        # (N_BATCHES, HEADS, SEQ_LEN, d_head) --> (N_BATCHES, HEADS, SEQ_LEN, d_head, d_head)
+        L: torch.Tensor = self.metric_factor(x)
         
-        #(N_BATCHES, SEQ_LEN, embed_dim) --> (N_BATCHES, SEQ_LEN, d_head, metric_dim)
-        L: torch.Tensor = self.metric_factor(target_embed)
-        
-        # (d_head, d_head) + (N_BATCHES, SEQ_LEN, d_head, metric_dim) @ (N_BATCHES, SEQ_LEN, metric_dim, d_head) --> (N_BATCHES, SEQ_LEN, d_head, d_head)
+        # (d_head, d_head) + *(N_BATCHES, HEADS, SEQ_LEN, d_head, d_head) @ (N_BATCHES, HEADS, SEQ_LEN, d_head, d_head) --> (N_BATCHES, HEADS, SEQ_LEN, d_head, d_head)
         G = self.identity + self.epsilon * L @ L.transpose(-2, -1)
-
-        # (N_BATCHES, HEADS, SEQ_LEN, d_head) --> (N_BATCHES, HEADS, d_head, SEQ_LEN)
-        # (N_BATCHES, SEQ_LEN, d_head, d_head) @ (N_BATCHES, HEADS, d_head, SEQ_LEN) --> (N_BATCHES, HEADS, d_head, SEQ_LEN)
-        return G @ x.transpose(-2, -1)
+        
+        # (N_BATCHES, HEADS, SEQ_LEN, 1, d_head) @ (N_BATCHES, HEADS, SEQ_LEN, d_head, d_head) --> (N_BATCHES, HEADS, SEQ_LEN, d_head)
+        return (x.unsqueeze(-2) @ G).squeeze(-2)
 
 
 class MultiHeadAttentionBlock(nn.Module):
@@ -150,30 +145,18 @@ class MultiHeadAttentionBlock(nn.Module):
         key = key.view(key.shape[0], key.shape[1], self.heads, -1).transpose(1, 2)
         value = value.view(value.shape[0], value.shape[1], self.heads, -1).transpose(1, 2)
         
-        # (N_BATCHES, HEADS, SEQ_LEN, d_head) @ (...) --> (N_BATCHES, HEADS, d_head, SEQ_LEN)
-        # (N_BATCHES, HEADS, SEQ_LEN, d_head) @ (N_BATCHES, HEADS, d_head, SEQ_LEN) --> (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
-        attention_scores: torch.Tensor = query @ self.metric(key) / math.sqrt(self.d_head)
-        
-        assert mask.dtype == torch.bool, f"Mask must be boolean, got {mask.dtype}"
-        
-        if MIXED_PRECISION_ENABLED:
-            attention_scores = attention_scores.to(torch.float32)
-            
-        attention_scores.masked_fill_(mask == False, -1e09)
-
-        # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN)
-        attention_scores = torch.softmax(
-            attention_scores, dim=-1
-        )
-
-        if MIXED_PRECISION_ENABLED:
-            attention_scores = attention_scores.to(torch.float16)
-
-        attention_scores = self.dropout(attention_scores)
-
-        # (N_BATCHES, HEADS, SEQ_LEN, SEQ_LEN) @ (N_BATCHES, HEADS, SEQ_LEN, d_head)
-        # (N_BATCHES, HEADS, SEQ_LEN, d_head)
-        output: torch.Tensor = attention_scores @ value
+        query = self.metric(query)
+        with torch.nn.attention.sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]):
+            # Step 1: attn_scores = (query @ key.transpose(2, 3)) / math.sqrt(self.d_head)
+            # Step 2: attn_scores.masked_fill_(mask == False, -1e09)
+            # Step 3: attn_probs = F.softmax(attn_scores, dim=-1)
+            # Step 4: output = (attn_probs @ value)
+            output = F.scaled_dot_product_attention(
+                query, key, value,
+                attn_mask=mask,
+                dropout_p=self.dropout.p if self.training else 0.0,
+                is_causal=(mask is None)
+            )
 
         # (N_BATCHES, HEADS, SEQ_LEN, d_head) -> (N_BATCHES, SEQ_LEN, HEADS, d_head)
         output = output.transpose(1, 2)
